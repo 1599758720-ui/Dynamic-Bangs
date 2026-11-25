@@ -11,7 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/macOS-14%2B-black?style=flat-square" alt="macOS 14+">
   <img src="https://img.shields.io/badge/Arch-Apple%20Silicon%20(arm64)-black?style=flat-square" alt="Apple Silicon">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Scxttk/CoteDOs?style=flat-square" alt="MIT license"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/1599758720-ui/Dynamic-Bangs?style=flat-square" alt="MIT license"></a>
 </p>
 
 ---
