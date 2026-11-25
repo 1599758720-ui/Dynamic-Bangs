@@ -4,98 +4,32 @@ import SwiftUI
 
 final class NotchWindowController {
     private let panel: NotchPanel
+    private let container: NotchContainerView
     private let viewModel: NotchViewModel
     private let nowPlaying: NowPlayingManager
     private let shelf: FileShelfModel
     private let activities: ActivityManager
     private let pomodoro: PomodoroManager
     private let spectrum: SpectrumAnalyzer
-    private let container: NotchContainerView
+    private let menuBarMonitor = MenuBarOverlapMonitor()
 
-    private var collapseWorkItem: DispatchWorkItem?
-    /// Pending "advance to the next stage" step of the staged expand/collapse
-    /// walk, so a direction change mid-walk can cancel it and reverse.
-    private var stageWorkItem: DispatchWorkItem?
-    /// Pending "the island has rested, mount the pages" step after the final
-    /// expand hop (see `NotchLayout.pagesSettleDelay`). Cancelled whenever a
-    /// new walk starts; the view model clears the flag itself on any step
-    /// away from `.expanded`.
-    private var pagesWorkItem: DispatchWorkItem?
-    /// Where the staged walk is currently heading (`.expanded` or `.collapsed`),
-    /// or nil when the island is at rest. Guards against hover events restarting
-    /// a walk that's already going the right way.
-    private var stagingTarget: NotchViewModel.IslandState?
-    private var scrollMonitor: Any?
-    private var scrollMonitorGlobal: Any?
-    private var hoverMonitorGlobal: Any?
-    private var hoverMonitorLocal: Any?
-    private var dragMonitorLocal: Any?
-    private var dragMonitorGlobal: Any?
-    /// Cursor position and panel origin at the moment the button went down over
-    /// the island, so the drag is measured from where it started instead of
-    /// accumulating per-event deltas (which drift, and cannot be undone by a
-    /// clamp mid-drag).
-    private var dragAnchor: (mouse: NSPoint, origin: NSPoint)?
-    /// The panel's live origin while a drag is in flight. Set means dragging:
-    /// the panel follows the cursor freely and only lands on a border when the
-    /// button comes up, so `panelFrame(on:)` must hand out this origin rather
-    /// than the placement's.
-    private var dragOrigin: NSPoint?
-    private var isDraggingPanel: Bool { dragOrigin != nil }
-    private let menuBarOverlapMonitor = MenuBarOverlapMonitor()
-    private let safariFullscreenMonitor = SafariFullscreenMonitor()
-    /// Last reported Safari-fullscreen state; applied (or ignored, when it
-    /// concerns another display) by `applySafariDodge`.
-    private var safariDodge: SafariFullscreenMonitor.DodgeState?
-    /// Horizontal offset of the whole *panel* off screen centre while dodging
-    /// Safari's URL bar. Additive to and independent of the SwiftUI island's
-    /// own hero-centring shift; every screen-rect helper must include it.
-    private var panelXOffset: CGFloat = 0
-    /// Downward offset of the panel while dodged: the pill drops from the top
-    /// edge to sit vertically centred on Safari's URL field, nestling beside
-    /// the toolbar rather than floating above it. Zero when not dodging.
-    private var panelYOffset: CGFloat = 0
-    /// All reasons the panel is currently hidden or passive. `panel.alphaValue`
-    /// and `panel.ignoresMouseEvents` are derived from this via
-    /// `applyPresence`/`updateClickThrough` — never written directly, so no
-    /// feature's restore path can stomp another's hide.
+    var onOpenSettings: (() -> Void)?
+    var onPauseChanged: ((Bool) -> Void)?
+
+    private var lockPanel: NotchPanel?
+    private var isSuspended = false
     private var policy = PanelPresencePolicy()
-    /// True while the frontmost app's menu bar overlaps the notch pill — the
-    /// panel is hidden and non-interactive for the duration (see
-    /// `setMenuBarOverlap`).
-    private var menuBarOverlapActive: Bool { policy.hideReasons.contains(.menuBarOverlap) }
-    /// True while the user has paused the notch (⌥⌘N / status menu) — hidden,
-    /// click-through, and every wake path (hover, gesture, drag, capture
-    /// hotkey) is inert until it is lifted again. See `setUserDisabled`.
-    var isUserDisabled: Bool { policy.hideReasons.contains(.userDisabled) }
-    /// True while the capture hotkey holds the island open: the panel must be
-    /// interactive regardless of where the cursor is (see
-    /// `PanelPresencePolicy.ignoresMouseEvents`). Cleared on any collapse.
-    private var captureHotkeyActive = false
-    /// Subscriptions that drive `refreshIdlePresence`: the pill's contents are
-    /// published state the controller otherwise only reads lazily inside event
-    /// handlers, but hiding on idle needs a push the moment music stops or a
-    /// timer ends — the cursor may not move for minutes.
     private var cancellables: Set<AnyCancellable> = []
+    private var localMonitor: Any?
+    private var globalMonitor: Any?
+    private var collapseWorkItem: DispatchWorkItem?
+    private var expandedInteraction = ExpandedInteraction()
+    private var musicSwipeRecognizer = MusicSwipeRecognizer()
+    private var musicFeedbackWork: DispatchWorkItem?
+    private var pendingAppLaunch: UUID?
 
-    /// When the user closes the notch with a swipe-up, suppress hover-expand
-    /// until the cursor has left the island once.
-    private var suppressHover = false
-
-    /// The screen the panel is currently positioned on, so we only move it when
-    /// the cursor actually crosses to a different display.
-    private weak var currentScreen: NSScreen?
-
-    /// Last cursor position we actually evaluated hover for. `mouseMoved` fires
-    /// far more often than the cursor meaningfully moves; skipping sub-pixel
-    /// deltas keeps the monitor cheap.
-    private var lastEvaluatedCursor: NSPoint?
-
-    /// Timestamp of the last horizontal scroll event, so one swipe pages one tab
-    /// (trackpad momentum keeps firing events; we only act on a fresh gesture).
-    private var lastHorizontalScroll = Date.distantPast
-
-    init(viewModel: NotchViewModel, nowPlaying: NowPlayingManager, shelf: FileShelfModel, activities: ActivityManager, pomodoro: PomodoroManager, capture: ObsidianCapture, spectrum: SpectrumAnalyzer) {
+    init(viewModel: NotchViewModel, nowPlaying: NowPlayingManager, shelf: FileShelfModel,
+         activities: ActivityManager, pomodoro: PomodoroManager, capture: ObsidianCapture, spectrum: SpectrumAnalyzer) {
         self.viewModel = viewModel
         self.nowPlaying = nowPlaying
         self.shelf = shelf
@@ -103,27 +37,16 @@ final class NotchWindowController {
         self.pomodoro = pomodoro
         self.spectrum = spectrum
 
-        let frame = NSRect(x: 0, y: 0, width: viewModel.panelWidth, height: viewModel.panelHeight)
+        let frame = NSRect(origin: .zero, size: viewModel.panelSize)
         panel = NotchPanel(contentRect: frame)
-
-        let root = NotchRootView(viewModel: viewModel, nowPlaying: nowPlaying, shelf: shelf, activities: activities, pomodoro: pomodoro, capture: capture, spectrum: spectrum)
-        let hostingView = NSHostingView(rootView: root)
-        hostingView.translatesAutoresizingMaskIntoConstraints = false
-
         container = NotchContainerView(frame: frame)
-        container.islandRect = { [weak self, weak container] in
-            guard let self, let container else { return .zero }
-            let (width, height) = self.currentIslandSize()
-            // The island floats `islandTopGap` off whichever border it is
-            // docked to — same arithmetic as the screen-space rects, one
-            // implementation over in `NotchPlacement`.
-            return self.placement.islandRect(
-                inPanel: NSRect(origin: .zero, size: container.bounds.size),
-                size: CGSize(width: width, height: height),
-                gap: NotchLayout.islandTopGap,
-                shift: self.currentIslandXShift()
-            )
-        }
+
+        let hostingView = NSHostingView(rootView: NotchRootView(
+            viewModel: viewModel, nowPlaying: nowPlaying, shelf: shelf, activities: activities,
+            pomodoro: pomodoro, capture: capture, spectrum: spectrum
+        ))
+        hostingView.sizingOptions = []
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(hostingView)
         NSLayoutConstraint.activate([
             hostingView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -133,1236 +56,620 @@ final class NotchWindowController {
         ])
         panel.contentView = container
 
-        container.onDragEntered = { [weak self] in self?.handleDragEntered() }
+        container.islandRect = { [weak self] in
+            guard let self else { return .zero }
+            return self.localRect(self.pointerHitRect)
+        }
+        container.dropRect = { [weak self] in
+            guard let self else { return .zero }
+            return self.localRect(self.dropRect)
+        }
+        container.onDragEntered = { [weak self] in self?.handleDragEntered() ?? false }
         container.onDragExited = { [weak self] in self?.handleDragExited() }
         container.onDrop = { [weak self] urls in self?.handleDrop(urls) }
+        viewModel.onOpenRequested = { [weak self] in self?.presentDashboard() }
+        viewModel.onCloseRequested = { [weak self] in self?.setExpanded(false) }
+        viewModel.onOpenQuickActions = { [weak self] in self?.presentQuickActions() }
+        viewModel.onQuickActionSelected = { [weak self] action in self?.runQuickAction(action) }
 
-        installScrollMonitor()
-        installHoverMonitor()
-        installDragMonitor()
-
-        // Returning nil reads as "no overlap" (the monitor fails open), which
-        // is what a user-placed notch wants: the hide exists because the pill
-        // cannot dodge sideways out of a wide menu bar, and a pill the user has
-        // dragged off the menu bar isn't in its way at all.
-        menuBarOverlapMonitor.notchLeftEdgeProvider = { [weak self] in
-            guard let self, self.placement.isHome else { return nil }
-            return self.islandScreenRect(expanded: false)?.minX
+        menuBarMonitor.targetGeometryProvider = { [weak self] in
+            self?.viewModel.screenGeometry
         }
-        menuBarOverlapMonitor.onChange = { [weak self] overlapping in self?.setMenuBarOverlap(overlapping) }
-        menuBarOverlapMonitor.start()
-
-        // No explicit precedence between the two monitors is needed: a dodged
-        // pill sits far right of the menu-bar items, and the overlap monitor
-        // reads the pill's real (shifted) left edge via the provider above, so
-        // it reports no overlap while the dodge is active.
-        safariFullscreenMonitor.onChange = { [weak self] state in
-            self?.safariDodge = state
-            self?.applySafariDodge()
+        menuBarMonitor.excludedWindowNumbersProvider = { [weak self] in
+            guard let self else { return [] }
+            let numbers = [self.panel.windowNumber, self.lockPanel?.windowNumber].compactMap { $0 }.filter { $0 > 0 }
+            return Set(numbers)
         }
-        safariFullscreenMonitor.start()
-
-        #if DEBUG
-        // Remote control for looking at the real thing: drives the *staged* hover
-        // walk without a cursor, which the capture hotkey can't stand in for
-        // because it skips the stages on purpose. `offset:<pt>` drops the island
-        // below the top edge so a shot has headroom above it; `offset:0` restores
-        // reality (the next Safari-dodge change overwrites it either way).
-        //
-        //   osascript -l JavaScript -e 'ObjC.import("Foundation");
-        //     $.NSDistributedNotificationCenter.defaultCenter.postNotificationNameObjectUserInfoDeliverImmediately(
-        //       "com.scott.cotedos.debug.island", "expand", $(), true)'
-        //
-        // DEBUG-only, and it has to stay that way: a DistributedNotificationCenter
-        // observer is reachable by *any* process on the machine, so in a shipping
-        // build this is an unauthenticated control surface over the UI. It only
-        // opens a notch and nudges a panel, which is why it went unnoticed while
-        // it was in Release.
-        DistributedNotificationCenter.default().addObserver(
-            forName: Notification.Name("com.scott.cotedos.debug.island"), object: nil, queue: .main
-        ) { [weak self] note in
+        menuBarMonitor.onChange = { [weak self] clearance in
             guard let self else { return }
-            // Where the panel actually is, from the one place that knows. The
-            // window's frame can be read from outside with CGWindowList, but
-            // that answers a different question than "what does the controller
-            // think", and the two disagreeing is exactly the bug worth finding.
-            if note.object as? String == "state" {
-                fputs("""
-                [state] panel \(self.panel.frame) size \(self.panelSize) \
-                placement \(self.placement) island \(self.currentIslandSize()) \
-                dodge \(self.panelXOffset)/\(self.panelYOffset) \
-                screen \(self.currentScreen?.frame.debugDescription ?? "-") \
-                hidden \(self.policy.hideReasons) passive \(self.policy.passiveReasons) \
-                clickThrough \(self.panel.ignoresMouseEvents) key \(self.panel.isKeyWindow) \
-                monitors \(self.dragMonitorLocal != nil)/\(self.hoverMonitorLocal != nil)\n
-                """, stderr)
-                return
-            }
-            if let command = note.object as? String, command.hasPrefix("offset:"),
-               let value = Double(command.dropFirst("offset:".count)) {
-                self.panelYOffset = CGFloat(value)
-                if let screen = self.currentScreen {
-                    self.panel.setFrame(self.panelFrame(on: screen), display: true)
-                }
-                return
-            }
-            self.suppressHover = false
-            self.collapseWorkItem?.cancel()
-            if note.object as? String == "expand" {
-                // Driving the walk without a cursor: an idle-hidden panel has to
-                // un-hide first or it animates at alpha 0.
-                self.policy.hideReasons.remove(.idle)
-                self.applyPresence(animated: false)
-            }
-            self.setExpanded(note.object as? String == "expand")
+            self.viewModel.menuBarClearance = clearance
+            self.refreshPresence(animated: false)
         }
-        #endif
 
-        // Idle-hide reactivity: whatever can change the pill's contents (or
-        // land the island back at rest) re-evaluates the idle presence. The
-        // async main hop matters — @Published emits on willSet, so evaluating
-        // synchronously would read the *old* property values.
         let contentChanged: [AnyPublisher<Void, Never>] = [
             nowPlaying.$isPlaying.map { _ in }.eraseToAnyPublisher(),
             spectrum.$hasSignal.map { _ in }.eraseToAnyPublisher(),
             pomodoro.$pillText.map { _ in }.eraseToAnyPublisher(),
             activities.$current.map { _ in }.eraseToAnyPublisher(),
             shelf.$isDropTargeted.map { _ in }.eraseToAnyPublisher(),
-            viewModel.$islandState.map { _ in }.eraseToAnyPublisher(),
+            viewModel.$musicSwipe.map { _ in }.eraseToAnyPublisher(),
+            WidgetStore.shared.$layout.map { _ in }.eraseToAnyPublisher(),
+            SystemStatus.shared.$focusActive.map { _ in }.eraseToAnyPublisher(),
+            UserSettings.shared.objectWillChange.eraseToAnyPublisher(),
         ]
         Publishers.MergeMany(contentChanged)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] in self?.refreshIdlePresence() }
+            .sink { [weak self] in self?.refreshPresence() }
             .store(in: &cancellables)
 
-        // Settings changes can move the pill width (spectrum-only mode,
-        // wave width), which shifts the dodge anchor — re-derive it live
-        // (a no-op while not dodging).
-        UserSettings.shared.objectWillChange
+        SystemStatus.shared.$isLocked.removeDuplicates().dropFirst()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] in self?.applySafariDodge() }
+            .sink { [weak self] locked in self?.updateLockState(locked) }
             .store(in: &cancellables)
 
-        // Escape out of the fullscreen takeover goes all the way home to the
-        // pill, not back to the island page it was opened from. The wave is
-        // already flying to the pill's pose (see
-        // `SpectrumFullscreenController`), so the island has to be collapsing
-        // underneath it or the run would land on a page still standing open.
-        // Via `collapseViaGesture`, so the cursor sitting over the island
-        // doesn't immediately hover it back open.
-        SpectrumFullscreen.shared.$isCollapsing
-            .removeDuplicates()
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.activeSpaceDidChangeNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.reposition() }
+            .store(in: &cancellables)
+
+        SpectrumFullscreen.shared.$isCollapsing.removeDuplicates()
             .filter { $0 }
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.collapseViaGesture() }
+            .sink { [weak self] _ in self?.setExpanded(false) }
             .store(in: &cancellables)
-    }
-
-    // MARK: - Idle presence
-
-    /// Whether the collapsed pill has anything to show. Deliberately *not*
-    /// including a non-empty shelf: files alone don't keep the pill on screen
-    /// (they stay reachable via the proximity reveal); the badge shows
-    /// whenever audio or a timer makes the pill visible anyway. Live
-    /// activities count — an AirPods route pill can fire while otherwise idle.
-    private var hasCollapsedContent: Bool {
-        hasAudioHero || pomodoro.pillText != nil || activities.current != nil
-    }
-
-    /// Idle = fully invisible: with nothing to show and the cursor away, the
-    /// pill hides entirely. Proximity (the *expanded* island footprint) is the
-    /// first of two stages: entering it merely reveals the collapsed pill;
-    /// expanding still requires hovering the pill itself or the swipe gesture,
-    /// exactly as with a content-bearing pill.
-    private func refreshIdlePresence(animated: Bool = true) {
-        let cursorNearby = islandScreenRect(expanded: true)?.contains(NSEvent.mouseLocation) ?? false
-        let idle = viewModel.islandState == .collapsed
-            && stagingTarget == nil
-            && !hasCollapsedContent
-            && !shelf.isDropTargeted
-            && !cursorNearby
-        if idle {
-            policy.hideReasons.insert(.idle)
-        } else {
-            policy.hideReasons.remove(.idle)
-        }
-        applyPresence(animated: animated)
     }
 
     deinit {
-        if let scrollMonitor {
-            NSEvent.removeMonitor(scrollMonitor)
-        }
-        if let scrollMonitorGlobal {
-            NSEvent.removeMonitor(scrollMonitorGlobal)
-        }
-        if let hoverMonitorGlobal {
-            NSEvent.removeMonitor(hoverMonitorGlobal)
-        }
-        if let hoverMonitorLocal {
-            NSEvent.removeMonitor(hoverMonitorLocal)
-        }
-        if let dragMonitorLocal {
-            NSEvent.removeMonitor(dragMonitorLocal)
-        }
-        if let dragMonitorGlobal {
-            NSEvent.removeMonitor(dragMonitorGlobal)
-        }
-        menuBarOverlapMonitor.stop()
-        safariFullscreenMonitor.stop()
+        removeMonitors()
+        menuBarMonitor.stop()
     }
 
     func show() {
+        installMonitors()
         reposition()
-        panel.orderFrontRegardless()
-        // Idle at launch means hidden from the very first frame.
-        refreshIdlePresence(animated: false)
+        menuBarMonitor.start()
     }
 
-    /// Push the policy's verdict onto the panel: alpha (fading when animated)
-    /// plus the click-through gate. The only place `panel.alphaValue` is set.
-    private func applyPresence(animated: Bool) {
-        let targetAlpha: CGFloat = policy.isHidden ? 0 : 1
-        if panel.alphaValue != targetAlpha {
-            if animated {
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = NotchLayout.idleHideFadeDuration
-                    panel.animator().alphaValue = targetAlpha
-                }
-            } else {
-                panel.alphaValue = targetAlpha
-            }
-        }
-        updateClickThrough()
-    }
+    // MARK: - Display and visibility
 
-    // MARK: - Sleep/Wake lifecycle
-
-    /// Tear down the live event monitors before the system sleeps so no stale
-    /// global monitors fire during/after sleep. Paired with `resumeMonitors()`.
-    func suspendMonitors() {
-        if let scrollMonitor {
-            NSEvent.removeMonitor(scrollMonitor)
-            self.scrollMonitor = nil
-        }
-        if let scrollMonitorGlobal {
-            NSEvent.removeMonitor(scrollMonitorGlobal)
-            self.scrollMonitorGlobal = nil
-        }
-        if let hoverMonitorGlobal {
-            NSEvent.removeMonitor(hoverMonitorGlobal)
-            self.hoverMonitorGlobal = nil
-        }
-        if let hoverMonitorLocal {
-            NSEvent.removeMonitor(hoverMonitorLocal)
-            self.hoverMonitorLocal = nil
-        }
-        if let dragMonitorLocal {
-            NSEvent.removeMonitor(dragMonitorLocal)
-            self.dragMonitorLocal = nil
-        }
-        if let dragMonitorGlobal {
-            NSEvent.removeMonitor(dragMonitorGlobal)
-            self.dragMonitorGlobal = nil
-        }
-        // A drag can't survive a sleep: the mouse-up that would end it happens
-        // in another world. Land it on the nearest border now.
-        dragAnchor = nil
-        if isDraggingPanel { endPanelDrag() }
-        menuBarOverlapMonitor.stop()
-        safariFullscreenMonitor.stop()
-        collapseWorkItem?.cancel()
-        // Don't strand the island mid-walk over a sleep: finish the remaining
-        // stages immediately (no animation — the screen is going dark anyway).
-        stageWorkItem?.cancel()
-        stageWorkItem = nil
-        stagingTarget = nil
-        switch viewModel.islandState {
-        case .band, .solo, .condensing:
-            viewModel.islandState = .collapsed
-            captureHotkeyActive = false
-        case .expanded, .collapsed:
-            break
-        }
-    }
-
-    /// Re-install the monitors on wake and snap the panel back to the correct
-    /// screen (display topology can change while asleep).
-    func resumeMonitors() {
-        guard scrollMonitor == nil, scrollMonitorGlobal == nil, hoverMonitorGlobal == nil, hoverMonitorLocal == nil else { return }
-        installScrollMonitor()
-        installHoverMonitor()
-        installDragMonitor()
-        menuBarOverlapMonitor.start()
-        safariFullscreenMonitor.start()
-        reposition()
-        // Waking with the music long stopped: hide right away, don't wait for
-        // the first mouse move.
-        refreshIdlePresence(animated: false)
-    }
-
-    // MARK: - Quick Capture
-
-    /// Open the island on the capture tab and focus its text field. Driven by
-    /// the global hotkey. The panel is non-activating, so we make it key
-    /// explicitly so keystrokes reach the field.
-    func presentCapture() {
-        // Paused means paused: the capture hotkey must not reopen an island
-        // the user explicitly put away (and a hidden panel could not take
-        // keystrokes anyway — `ignoresMouseEvents` stays true while hidden).
-        guard !isUserDisabled else { return }
-        suppressHover = false
-        collapseWorkItem?.cancel()
-        // Hotkey from anywhere, including the idle-hidden state: un-hide first
-        // or the island would open at alpha 0.
-        policy.hideReasons.remove(.idle)
-        // Dodged beside Safari's URL bar: snap back to centre for typing; the
-        // collapse landing re-applies the dodge (see `advanceStaging`).
-        if panelXOffset != 0 || panelYOffset != 0, let screen = currentScreen {
-            panelXOffset = 0
-            panelYOffset = 0
-            panel.setFrame(panelFrame(on: screen), display: true)
-        }
-        viewModel.selectedTab = .capture
-        // Open directly (not through the staged reveal) so the field is ready
-        // to type into immediately.
-        setExpanded(true, staged: false)
-        // Hotkey-driven, not cursor-driven: force interactive regardless of
-        // where the cursor happens to be, or the field could be unclickable
-        // until the mouse moves over it.
-        captureHotkeyActive = true
-        applyPresence(animated: false)
-        panel.makeKeyAndOrderFront(nil)
-        viewModel.requestCaptureFocus()
-    }
-
+    /// Refresh the hardware notch and menu bar geometry on the target display.
     func reposition() {
-        guard let screen = ScreenManager.targetScreen() else { return }
-        currentScreen = screen
-        // A narrower display (or a placement restored from a Mac with a bigger
-        // one) can put the island past this screen's end — pull it back along
-        // the border before the frame is derived from it.
-        // A corner has no slack to clamp — the anchor already pins it to an end
-        // of the border, whatever size that border is.
-        if placement.anchor == .centre {
-            let clamped = NotchPlacement.clamped(along: placement.along, dock: placement.dock,
-                                                 screen: screen.frame, panelSize: panelSize,
-                                                 centreSnap: NotchLayout.dockCentreSnap)
-            if clamped != placement.along { placement.along = clamped }
-        }
-        panel.setFrame(panelFrame(on: screen), display: true)
-        // The screen may have changed under a dodge (cursor crossed displays,
-        // topology changed) — re-derive whether the dodge still applies here.
-        applySafariDodge()
-    }
-
-    /// Where the user has parked the island. Kept on the view model — the view
-    /// needs the border to know which way the island grows — but written only
-    /// from here, through `setPlacement`.
-    private var placement: NotchPlacement {
-        get { viewModel.placement }
-        set { viewModel.placement = newValue }
-    }
-
-    private var panelSize: CGSize { panelSize(on: placement.dock) }
-
-    /// The panel's size on a given border. It turns with the island: a portrait
-    /// panel on the sides, a landscape one top and bottom.
-    private func panelSize(on dock: NotchDock) -> CGSize {
-        let (length, thickness) = dock.lengthAndThickness(of: NotchLayout.expandedSize(on: dock))
-        return dock.size(length: length + NotchLayout.panelHorizontalMargin,
-                         thickness: thickness + NotchLayout.panelVerticalMargin)
-    }
-
-    private func panelFrame(on screen: NSScreen) -> NSRect {
-        // Mid-drag the panel is wherever the cursor has taken it; it belongs to
-        // no border until the button comes up.
-        if let dragOrigin { return NSRect(origin: dragOrigin, size: panelSize) }
-        return placement.panelFrame(screen: screen.frame, panelSize: panelSize,
-                                    dodge: CGSize(width: panelXOffset, height: panelYOffset))
-    }
-
-    // MARK: - Safari fullscreen dodge
-
-    /// True while the pill is dodged beside Safari's URL bar (visible but
-    /// click-through; hover and gestures suppressed).
-    private var isSafariDodged: Bool { policy.passiveReasons.contains(.safariFullscreen) }
-
-    /// Apply (or lift) the Safari-fullscreen dodge for the panel's current
-    /// screen. Entering force-closes an open island (same pattern as the
-    /// menu-bar overlap) and slides the panel right of the URL field; leaving
-    /// slides it back to centre. While the capture hotkey holds the island
-    /// open, application is deferred to the collapse landing — the island must
-    /// not jump mid-typing.
-    private func applySafariDodge() {
-        guard !captureHotkeyActive else { return }
-        // A user-placed notch is not the dodge's to move. Dragging the island
-        // to a border is a decision about where it belongs; the dodge exists to
-        // make the *home* pose survive Safari's fullscreen toolbar, and a pill
-        // parked at the bottom of the screen was never in that toolbar's way.
-        guard placement.isHome, !isDraggingPanel else {
-            if isSafariDodged {
-                policy.passiveReasons.remove(.safariFullscreen)
-                applyPresence(animated: false)
-            }
+        if !viewModel.placement.isHome { viewModel.placement = .home }
+        guard let screen = ScreenManager.targetScreen() else {
+            viewModel.screenGeometry = nil
+            panel.orderOut(nil)
+            lockPanel?.orderOut(nil)
             return
         }
-        let targetOffset: CGFloat
-        let targetYOffset: CGFloat
-        let active: Bool
-        if let dodge = safariDodge, let screen = currentScreen, dodge.screen !== screen {
-            // NSScreen identity is the suspect to rule out if the dodge ever
-            // fails silently on a single display.
-            NSLog("CoteDOs: dodge reported for other screen (dodge \(dodge.screen.frame) vs current \(screen.frame))")
-        }
-        if let dodge = safariDodge, let screen = currentScreen, dodge.screen === screen {
-            let pillWidth = viewModel.collapsedWidth(isPlaying: hasAudioHero, hasItems: !shelf.items.isEmpty, timerText: pomodoro.pillText)
-            let centerX = SafariFullscreenMonitor.dodgePillCenterX(
-                urlFieldMaxX: dodge.urlFieldFrame.maxX, screenFrame: screen.frame,
-                pillWidth: pillWidth)
-            targetOffset = centerX - screen.frame.midX
-            // Vertically centre the pill on the URL field (nudged up by the
-            // raise — the AX frame hugs the text, the visible container reads
-            // higher) so it nestles beside the toolbar instead of hugging the
-            // screen's top edge.
-            let restingCenterY = screen.frame.maxY - NotchLayout.islandTopGap - viewModel.collapsedHeight / 2
-            targetYOffset = max(0, (restingCenterY - dodge.urlFieldFrame.midY - NotchLayout.safariDodgeRaise).rounded())
-            active = true
+        position(on: screen)
+        menuBarMonitor.refreshNow()
+        if SystemStatus.shared.isLocked {
+            panel.orderOut(nil)
+            showLockBadge()
         } else {
-            targetOffset = 0
-            targetYOffset = 0
-            active = false
+            refreshPresence(animated: false)
+            if !isSuspended, !panel.isVisible { panel.orderFrontRegardless() }
         }
-
-        if active, !isSafariDodged {
-            stageWorkItem?.cancel(); stageWorkItem = nil
-            stagingTarget = nil
-            collapseWorkItem?.cancel()
-            viewModel.islandState = .collapsed
-            policy.passiveReasons.insert(.safariFullscreen)
-        } else if !active, isSafariDodged {
-            policy.passiveReasons.remove(.safariFullscreen)
-        }
-
-        if panelXOffset != targetOffset || panelYOffset != targetYOffset, let screen = currentScreen {
-            panelXOffset = targetOffset
-            panelYOffset = targetYOffset
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = NotchLayout.idleHideFadeDuration
-                panel.animator().setFrame(panelFrame(on: screen), display: true)
-            }
-        }
-        applyPresence(animated: false)
     }
 
-    /// Move the panel to the screen the cursor is on if it has changed. Only
-    /// acts while collapsed so an open island doesn't jump mid-interaction.
-    private func followCursorScreenIfNeeded() {
-        guard !viewModel.isExpanded else { return }
-        guard let screen = ScreenManager.targetScreen(), screen !== currentScreen else { return }
+    private func position(on screen: NSScreen) {
+        let geometry = ScreenManager.safeArea(for: screen)
+        if viewModel.screenGeometry != geometry { viewModel.screenGeometry = geometry }
+
+        let targetLevel: NSWindow.Level = viewModel.isNotchFlankingMode ? .statusBar : .floating
+        if panel.level != targetLevel { panel.level = targetLevel }
+
+        let frame: CGRect
+        if viewModel.isNotchFlankingMode {
+            frame = geometry.notchPanelFrame(size: viewModel.panelSize)
+        } else {
+            frame = geometry.panelFrame(placement: .home, size: viewModel.panelSize)
+        }
+        if viewModel.panelOrigin != frame.origin { viewModel.panelOrigin = frame.origin }
+        if panel.frame != frame { panel.setFrame(frame, display: true) }
+    }
+
+    var isPlacedByUser: Bool { false }
+
+    func resetPlacement() {
         reposition()
     }
 
-    // MARK: - Hover
+    var isUserDisabled: Bool { policy.hideReasons.contains(.userDisabled) }
 
-    /// Hover detection is driven by the *real* cursor position
-    /// (`NSEvent.mouseLocation`) checked against the actually-rendered island
-    /// rect in screen coordinates — not by an `NSTrackingArea`. Tracking areas
-    /// fire unreliably for a borderless, non-activating panel pinned to the top
-    /// screen edge (it overlaps the menu bar), which caused the notch to expand
-    /// while the cursor was merely inside the *expanded* footprint rather than
-    /// over the small visible pill. A global + local mouse-moved monitor is
-    /// deterministic: we only expand when the cursor is genuinely over the pill.
-    /// `.leftMouseDragged` is monitored alongside `.mouseMoved` because a
-    /// file drag emits *only* dragged events — without it, the click-through
-    /// gate (`panel.ignoresMouseEvents`) keeps whatever value it had before
-    /// the drag started, and an ignoring panel is skipped by AppKit's drag-
-    /// destination routing entirely, so the shelf never sees the drag. During
-    /// a drag we only refresh the gate; expanding stays with
-    /// `handleDragEntered`, which fires solely for registered file drags.
-    private func installHoverMonitor() {
-        hoverMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] event in
-            self?.evaluateHover(isDrag: event.type == .leftMouseDragged)
-        }
-        hoverMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] event in
-            self?.evaluateHover(isDrag: event.type == .leftMouseDragged)
-            return event
-        }
-    }
-
-    /// The current interactive footprint's size — matches what
-    /// `NotchContainerView.hitTest` actually accepts clicks within. Shared by
-    /// `container.islandRect` (view-local) and `interactiveScreenRect` (screen
-    /// coordinates) so the two never drift apart.
-    /// Mirrors `NotchRootView.hasAudioHero`: the pill widens for the audio hero
-    /// not only while a scriptable player reports `isPlaying`, but also while
-    /// any other system audio keeps the spectrum alive. The hit/hover rects
-    /// must use the same condition, or the visible pill grows wider than the
-    /// area that reacts to the cursor.
-    private var hasAudioHero: Bool {
-        nowPlaying.isPlaying || spectrum.hasSignal
-    }
-
-    private func currentIslandSize() -> (width: CGFloat, height: CGFloat) {
-        // Stay at the expanded footprint through the whole staged walk, not
-        // only at the terminal `.expanded` state — otherwise clicks fall
-        // through the still-visible large island while it collapses.
-        if viewModel.occupiesExpandedFootprint {
-            let size = viewModel.expandedIslandSize
-            return (size.width, size.height)
-        }
-        // Hug the visible pill (which sizes to its content) plus a small
-        // tolerance, so it only expands when hovering the notch itself. The
-        // tolerances follow the pill: the generous one along its run, the
-        // tighter one across it.
-        let size = placement.dock.size(
-            length: collapsedPillWidth + NotchLayout.hitTestWidthPadding,
-            thickness: viewModel.collapsedHeight + NotchLayout.hitTestHeightPadding
-        )
-        return (size.width, size.height)
-    }
-
-    /// Width of the collapsed pill as it is actually drawn — the controller-side
-    /// mirror of `NotchRootView.islandWidth`'s collapsed branch, activity and
-    /// all. A live activity takes the capsule over at its own width (220–264 pt
-    /// against an idle pill's 50), so a rect built from the content width alone
-    /// left most of a visible route or volume pill deaf to the cursor.
-    private var collapsedPillWidth: CGFloat {
-        if let activity = activities.current {
-            return NotchLayout.activityLength(isRoute: activity.kind == .audioRoute,
-                                              hasProgress: activity.progress != nil,
-                                              on: placement.dock)
-        }
-        return viewModel.collapsedWidth(
-            isPlaying: hasAudioHero, hasItems: !shelf.items.isEmpty, timerText: pomodoro.pillText)
-    }
-
-    /// Horizontal shift of the collapsed pill off screen centre — the
-    /// controller-side mirror of `NotchRootView.islandXOffset`, so the hit and
-    /// hover rects track the asymmetric (hero-centred) pill. Zero whenever the
-    /// interactive footprint is the big expanded rect anyway (which contains
-    /// the shifted pill), zero while an activity pill shows (it renders
-    /// centred), and zero once the island is parked on a border — there is no
-    /// notch to stay centred on there.
-    private func currentIslandXShift() -> CGFloat {
-        guard placement.isHome else { return 0 }
-        guard !viewModel.occupiesExpandedFootprint, activities.current == nil else { return 0 }
-        return viewModel.collapsedTrailingShift(isPlaying: hasAudioHero, hasItems: !shelf.items.isEmpty, timerText: pomodoro.pillText)
-    }
-
-    /// The actual clickable footprint in global screen coordinates — the same
-    /// rect `NotchContainerView.hitTest` honors, without the extra hover
-    /// tolerance `islandScreenRect` adds for open/close hysteresis. Used to
-    /// gate `panel.ignoresMouseEvents` so the panel only ever claims clicks
-    /// within the area that's actually interactive.
-    private func interactiveScreenRect() -> NSRect? {
-        guard let screen = ScreenManager.targetScreen() else { return nil }
-        let (width, height) = currentIslandSize()
-        return placement.islandRect(
-            inPanel: panelFrame(on: screen),
-            size: CGSize(width: width, height: height),
-            gap: NotchLayout.islandTopGap,
-            shift: currentIslandXShift()
-        )
-    }
-
-    /// Keep the panel click-through outside its visible footprint: the real
-    /// `NSPanel` frame is always sized for the expanded island plus shadow
-    /// margin (see `reposition`), so without this, clicks in the leftover
-    /// space around a collapsed pill would still make the panel (and app) key
-    /// — `NotchContainerView.hitTest` only stops the *content* from reacting,
-    /// it doesn't stop AppKit's window-level activation on mouse-down.
-    private func updateClickThrough(isDrag: Bool = false) {
-        let cursor = NSEvent.mouseLocation
-        // A file drag approaching the *idle-hidden* notch: the pill is
-        // invisible and pill-sized — an impossible drop target. Open the gate
-        // across the whole expanded footprint instead, so AppKit's drag-
-        // destination routing can find the container view at all;
-        // `handleDragEntered` then un-hides and expands. Only the lone `.idle`
-        // reason gets this — a menu-bar-overlap hide stays inert, and a
-        // visible pill keeps its exact rect-gated behaviour.
-        if isDrag, policy.hideReasons == [.idle],
-           let zone = islandScreenRect(expanded: true), zone.contains(cursor) {
-            panel.ignoresMouseEvents = false
-            return
-        }
-        let inside = interactiveScreenRect()?.contains(cursor) ?? false
-        panel.ignoresMouseEvents = policy.ignoresMouseEvents(
-            cursorInsideInteractiveRect: inside,
-            hotkeyOverride: captureHotkeyActive
-        )
-    }
-
-    /// The visible island rect in global screen coordinates (origin bottom-left),
-    /// matching what the SwiftUI island actually draws: pinned to the docked
-    /// border, floating `islandTopGap` off it.
-    private func islandScreenRect(expanded: Bool) -> NSRect? {
-        guard let screen = ScreenManager.targetScreen() else { return nil }
-        // Both insets follow the island rather than the screen: doubled along
-        // the border (it has two ends out in the open) and single across it
-        // (the border side is the one the bleed below covers).
-        let dock = placement.dock
-        let size: CGSize
-        if expanded {
-            let (length, thickness) = dock.lengthAndThickness(of: viewModel.expandedIslandSize)
-            size = dock.size(length: length + NotchLayout.expandedHoverInset * 2,
-                             thickness: thickness + NotchLayout.expandedHoverInset)
-        } else {
-            size = dock.size(length: collapsedPillWidth + NotchLayout.collapsedHoverInset * 2,
-                             thickness: viewModel.collapsedHeight + NotchLayout.collapsedHoverInset)
-        }
-        let rect = placement.islandRect(
-            inPanel: panelFrame(on: screen),
-            size: size,
-            gap: NotchLayout.islandTopGap,
-            shift: expanded ? 0 : currentIslandXShift()
-        )
-        // The island floats `islandTopGap` off its border, but the hover zone
-        // spans all the way to (and past) that border: pushing the cursor
-        // against the screen edge beside the island must keep opening it.
-        return placement.dock.bleeding(rect, by: NotchLayout.islandTopGap + NotchLayout.hoverTopBleed)
-    }
-
-    /// Pause or resume the whole notch on the user's say-so. Pausing
-    /// force-closes an open island and hides the panel; a hidden panel is
-    /// unconditionally click-through (`PanelPresencePolicy`), so the exact
-    /// spot the notch occupied becomes hoverable and clickable for whatever
-    /// sits underneath — the reason this exists. Resuming only lifts this one
-    /// reason; an idle or overlap hide stays in force.
     func setUserDisabled(_ disabled: Bool) {
         guard isUserDisabled != disabled else { return }
         if disabled {
-            stageWorkItem?.cancel(); stageWorkItem = nil
-            stagingTarget = nil
-            collapseWorkItem?.cancel()
-            captureHotkeyActive = false
-            viewModel.islandState = .collapsed
             policy.hideReasons.insert(.userDisabled)
+            shelf.isDropTargeted = false
+            setExpanded(false, animated: false)
         } else {
             policy.hideReasons.remove(.userDisabled)
-            // Coming back with nothing to show should land hidden-idle, not
-            // flash the empty pill under a cursor that isn't near it.
-            refreshIdlePresence(animated: false)
+            reposition()
         }
-        applyPresence(animated: false)
+        refreshPresence(animated: false)
+        if SystemStatus.shared.isLocked { showLockBadge() }
+        onPauseChanged?(disabled)
     }
 
-    /// Hide (and stop hit-testing) the panel while the frontmost app's menu
-    /// bar overlaps the notch pill, and restore it once the overlap clears.
-    /// An already-open island is forced closed first so it doesn't obscure
-    /// the menu bar it just started overlapping.
-    private func setMenuBarOverlap(_ active: Bool) {
-        guard menuBarOverlapActive != active else { return }
-        if active {
-            stageWorkItem?.cancel(); stageWorkItem = nil
-            stagingTarget = nil
-            collapseWorkItem?.cancel()
-            captureHotkeyActive = false
-            viewModel.islandState = .collapsed
-            policy.hideReasons.insert(.menuBarOverlap)
-        } else {
-            // Only this reason is lifted — any other hide reason (e.g. idle)
-            // stays in force instead of being blanket-restored away.
-            policy.hideReasons.remove(.menuBarOverlap)
-        }
-        applyPresence(animated: false)
+    private var desktopAvailable: Bool {
+        !isSuspended && !SystemStatus.shared.isLocked && !isUserDisabled
+            && viewModel.screenGeometry?.dockingFrame.isEmpty == false
     }
 
-    private func evaluateHover(isDrag: Bool = false) {
-        guard !menuBarOverlapActive, !isUserDisabled else { return }
-        // The panel is being carried to another border: it moves with the
-        // cursor, so every rect this would compare against is in flight. Hover
-        // resumes once it has landed (`endPanelDrag`).
-        guard !isDraggingPanel else { return }
+    private var hasAudio: Bool { nowPlaying.isPlaying || spectrum.hasSignal }
+    private var hasTransientActivity: Bool { activities.current != nil || viewModel.musicSwipe != nil }
+
+    private func refreshPresence(animated: Bool = true) {
         let cursor = NSEvent.mouseLocation
-        if let last = lastEvaluatedCursor, abs(last.x - cursor.x) < 1, abs(last.y - cursor.y) < 1 {
-            return
-        }
-        lastEvaluatedCursor = cursor
-        followCursorScreenIfNeeded()
-        updateClickThrough(isDrag: isDrag)
+        // In notch-flanking mode, stay mounted over the hardware notch so
+        // double-click and right-click remain available even when wings yield
+        // or slots are empty. Only floating mode hides completely when idle.
+        let idle = !viewModel.isNotchFlankingMode
+            && !viewModel.occupiesExpandedFootprint && !shelf.isDropTargeted
+            && !hasTransientActivity && !viewModel.hasCompactContent(hasAudio: hasAudio, timerText: pomodoro.pillText)
+            && !expandedHoverRect.contains(cursor)
+        if idle { policy.hideReasons.insert(.idle) }
+        else { policy.hideReasons.remove(.idle) }
 
-        // While dodged beside Safari's fullscreen URL bar the pill is
-        // deliberately passive: an expanded island there would sit on top of
-        // the toolbar and re-introduce exactly the interference the dodge
-        // removes. The capture hotkey remains the deliberate escape hatch.
-        if isSafariDodged { return }
-
-        // Mid-drag, only the click-through gate matters (so the panel becomes
-        // a valid drag destination). Hover expand/collapse must not run: a
-        // text-selection drag over the pill shouldn't open the notch, and the
-        // "cursor outside → collapse" branch would fight the drag-entered
-        // expansion while a file hovers over the open shelf.
-        if isDrag { return }
-
-        // Only the resting `.expanded` state gets the big hover rect. Every
-        // other state — including `.band`/`.solo`, which still render fairly
-        // wide — is treated as the small pill for hover purposes, on request:
-        // a cursor sitting in the leftover space of a collapsing notch should
-        // not reopen it; only actually hovering the (shrinking) pill itself
-        // should. The staged collapse/expand walk itself is untouched — it
-        // still runs its own animation regardless of this hit-test rect.
-        if viewModel.isExpanded {
-            guard let rect = islandScreenRect(expanded: true) else { return }
-            let inside = rect.contains(cursor)
-            if inside {
-                collapseWorkItem?.cancel()
-                // Reverse an in-progress collapse walk (no-op once fully open).
-                // Respect the post-swipe suppression so a swipe-up close isn't
-                // instantly undone by a stationary cursor.
-                if !suppressHover { setExpanded(true) }
-            } else if !shelf.isDropTargeted && viewModel.holdsIslandOpen {
-                // The spectrum page is up: something to leave running and watch,
-                // so the cursor leaving means nothing. No grace timer either —
-                // this releases itself on a tab change or a close, so it can't
-                // get stuck the way the capture lock could. Swipe up (or ⌥⌘S to
-                // take it fullscreen) remains the way out.
-                collapseWorkItem?.cancel()
-            } else if !shelf.isDropTargeted && !viewModel.isInteractionLocked {
-                // Cursor left the fully-expanded footprint: collapse
-                // immediately. The hover monitor is deterministic, so no
-                // debounce delay is needed.
-                collapseWorkItem?.cancel()
-                setExpanded(false)
-            } else if !shelf.isDropTargeted && viewModel.isInteractionLocked {
-                // The capture field is focused (e.g. right after submitting a
-                // note, which re-focuses it for the next thought) and normally
-                // that keeps the island open so typing isn't dismissed. But
-                // nothing ever un-focuses it on its own, so without this the
-                // island stayed open forever once you'd used Capture — the
-                // cursor being gone is itself a signal you're done. Grant a
-                // short grace period instead of blocking collapse indefinitely.
-                if collapseWorkItem == nil {
-                    let work = DispatchWorkItem { [weak self] in
-                        guard let self else { return }
-                        // Clear the slot first: the `== nil` guard above is what
-                        // re-arms this grace timer, so a fired item must release
-                        // it or the grace never schedules again after the first.
-                        self.collapseWorkItem = nil
-                        self.viewModel.isInteractionLocked = false
-                        self.setExpanded(false)
-                    }
-                    collapseWorkItem = work
-                    DispatchQueue.main.asyncAfter(deadline: .now() + NotchLayout.interactionLockGraceDelay, execute: work)
+        let visible = desktopAvailable && !policy.isHidden
+        if viewModel.panelVisible != visible { viewModel.panelVisible = visible }
+        let alpha: CGFloat = visible ? 1 : 0
+        if panel.alphaValue != alpha {
+            if animated && !Motion.isReduced {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = NotchLayout.idleHideFadeDuration
+                    panel.animator().alphaValue = alpha
                 }
-            }
-        } else {
-            // Stage one of the idle reveal: with nothing to show, the pill's
-            // *presence* follows proximity to the expanded footprint — enter
-            // and the collapsed pill fades in, leave and it fades back out.
-            // Expanding (stage two) still needs the pill-rect hover below or
-            // the swipe gesture, same as a content-bearing pill.
-            guard let rect = islandScreenRect(expanded: false) else { return }
-            if !hasCollapsedContent && !shelf.isDropTargeted {
-                // A cursor that has already reached the pill is about to open
-                // it, and the expand walk glides the selected glyph 88 pt
-                // across the island. Played over a panel that is still fading
-                // up, that reads as an icon flying in from nowhere rather than
-                // as the pill's own glyph travelling — which is why coming in
-                // fast looked so different from arriving slowly, when the fade
-                // was long finished. Snap it visible instead, the same way a
-                // drag reaching the hidden notch does.
-                refreshIdlePresence(animated: !rect.contains(cursor))
-            }
-            guard !policy.isHidden else { return }
-            let inside = rect.contains(cursor)
-            if inside {
-                guard !suppressHover else { return }
-                collapseWorkItem?.cancel()
-                setExpanded(true)
             } else {
-                // Cursor left the pill: clear the post-swipe suppression so the
-                // next genuine hover can expand again.
-                suppressHover = false
+                panel.alphaValue = alpha
             }
-        }
-    }
-
-    // MARK: - Carrying the island to another border
-
-    /// Press the island and pull: past `panelDragThreshold` the whole panel
-    /// follows the cursor, and on release it lands on the nearest screen border
-    /// (see `NotchPlacement.snapping`). It is always on one — the island is a
-    /// piece of chrome, not a floating window, and something adrift in the
-    /// middle of the screen is in the way of more than the notch ever was.
-    ///
-    /// Driven by an event monitor rather than the responder chain: the SwiftUI
-    /// hosting view covers the whole panel and takes the press first, so
-    /// `NotchContainerView.mouseDown` never sees it.
-    private func installDragMonitor() {
-        dragMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
-            guard let self else { return event }
-            return self.handleMouseButton(event, local: true) ? nil : event
-        }
-        // A drag that wanders off the panel keeps being delivered to the window
-        // it started in, but a mouse-*up* over another app is not ours to see —
-        // without this the panel would stay glued to the cursor.
-        dragMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp]) { [weak self] event in
-            _ = self?.handleMouseButton(event, local: false)
-        }
-    }
-
-    /// Returns whether the event was consumed. Only the drag's own events are:
-    /// the initial press is passed through, because a press that never travels
-    /// is a plain click and belongs to whatever it landed on.
-    private func handleMouseButton(_ event: NSEvent, local: Bool) -> Bool {
-        switch event.type {
-        case .leftMouseDown:
-            dragAnchor = nil
-            guard local, event.window === panel, !isUserDisabled, !policy.isHidden,
-                  let rect = interactiveScreenRect(), rect.contains(NSEvent.mouseLocation)
-            else { return false }
-            dragAnchor = (mouse: NSEvent.mouseLocation, origin: panel.frame.origin)
-            return false
-        case .leftMouseDragged:
-            guard let anchor = dragAnchor else { return false }
-            let mouse = NSEvent.mouseLocation
-            let dx = mouse.x - anchor.mouse.x
-            let dy = mouse.y - anchor.mouse.y
-            if !isDraggingPanel {
-                guard hypot(dx, dy) >= NotchLayout.panelDragThreshold else { return false }
-                beginPanelDrag()
-            }
-            let origin = NSPoint(x: anchor.origin.x + dx, y: anchor.origin.y + dy)
-            dragOrigin = origin
-            panel.setFrameOrigin(origin)
-            return true
-        case .leftMouseUp:
-            dragAnchor = nil
-            guard isDraggingPanel else { return false }
-            endPanelDrag()
-            return true
-        default:
-            return false
-        }
-    }
-
-    private func beginPanelDrag() {
-        dragOrigin = panel.frame.origin
-        collapseWorkItem?.cancel()
-        stageWorkItem?.cancel(); stageWorkItem = nil
-        stagingTarget = nil
-        // The dodge is the only other thing that moves this panel, and it
-        // stands down for a user-placed notch (see `applySafariDodge`). Let go
-        // of its shift here — the drag measures from the panel's real origin,
-        // which already includes it.
-        panelXOffset = 0
-        panelYOffset = 0
-        policy.passiveReasons.remove(.safariFullscreen)
-        applyPresence(animated: false)
-        cancelPendingContentPress()
-    }
-
-    /// End the press the island's SwiftUI content is still holding, at a point
-    /// far outside it. The drag swallows the real mouse-up, so without this a
-    /// drag started on a button would either fire it on release or leave it
-    /// stuck lit.
-    private func cancelPendingContentPress() {
-        guard let cancel = NSEvent.mouseEvent(
-            with: .leftMouseUp,
-            location: NSPoint(x: -viewModel.panelWidth, y: -viewModel.panelHeight),
-            modifierFlags: [],
-            timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: panel.windowNumber,
-            context: nil,
-            eventNumber: 0,
-            clickCount: 1,
-            pressure: 0
-        ) else { return }
-        panel.sendEvent(cancel)
-    }
-
-    private func endPanelDrag() {
-        guard let origin = dragOrigin else { return }
-        let panelRect = NSRect(origin: origin, size: panelSize)
-        dragOrigin = nil
-        // The border it lands on is the one on the screen it was dropped over,
-        // so the island can be carried to another display by hand.
-        guard let screen = screenHolding(panelRect) ?? currentScreen ?? ScreenManager.targetScreen() else { return }
-        currentScreen = screen
-        let (width, height) = currentIslandSize()
-        let island = placement.islandRect(inPanel: panelRect,
-                                          size: CGSize(width: width, height: height),
-                                          gap: NotchLayout.islandTopGap)
-        setPlacement(NotchPlacement.snapping(islandRect: island, screen: screen.frame,
-                                             panelSize: { self.panelSize(on: $0) },
-                                             centreSnap: NotchLayout.dockCentreSnap,
-                                             cornerSnap: NotchLayout.dockCornerSnap),
-                     animated: true)
-        Haptics.perform(.alignment)
-    }
-
-    /// The screen the dragged panel is mostly on — by its centre, so a panel
-    /// straddling two displays lands on the one it is more over.
-    private func screenHolding(_ rect: NSRect) -> NSScreen? {
-        let centre = NSPoint(x: rect.midX, y: rect.midY)
-        return NSScreen.screens.first { $0.frame.contains(centre) }
-    }
-
-    /// Put the island on a border and move the panel there. The SwiftUI
-    /// alignment and the panel frame animate together (see
-    /// `NotchLayout.dockSettleDuration`) — the island is pinned to a different
-    /// corner of the panel afterwards, so animating only one of the two would
-    /// have it jump out of its own panel and glide back in.
-    private func setPlacement(_ new: NotchPlacement, animated: Bool) {
-        guard let screen = currentScreen ?? ScreenManager.targetScreen() else { return }
-        if new != placement {
-            if animated {
-                withAnimation(NotchLayout.dockSettleAnimation) { placement = new }
-            } else {
-                placement = new
-            }
-        }
-        let frame = panelFrame(on: screen)
-        if animated {
-            NSAnimationContext.runAnimationGroup({ context in
-                context.duration = NotchLayout.dockSettleDuration
-                panel.animator().setFrame(frame, display: true)
-            }, completionHandler: { [weak self] in
-                // The animator does not always run. Reset from the status menu
-                // left the placement changed and the panel still sitting on the
-                // border it came from — the island drawn somewhere the cursor
-                // rects were not, so nothing could be clicked. Whatever the
-                // animator did or didn't do, the frame lands here.
-                guard let self, self.dragOrigin == nil, self.panel.frame != frame else { return }
-                self.panel.setFrame(frame, display: true)
-            })
-        } else {
-            panel.setFrame(frame, display: true)
         }
         updateClickThrough()
-        // Back home, the automatic placements are the notch's business again.
-        applySafariDodge()
-        refreshIdlePresence(animated: false)
     }
 
-    /// Put the island back where the physical notch is. The way out of a
-    /// placement that can no longer be reached — or simply no longer wanted —
-    /// without hunting for the pill with the mouse.
-    func resetPlacement() {
-        guard !placement.isHome else { return }
-        setPlacement(.home, animated: true)
-    }
-
-    /// Whether the user has carried the island off its home pose (drives the
-    /// status menu's reset item).
-    var isPlacedByUser: Bool { !placement.isHome }
-
-    // MARK: - File drag
-
-    private func handleDragEntered() {
-        guard !menuBarOverlapActive, !isSafariDodged, !isUserDisabled else { return }
-        collapseWorkItem?.cancel()
-        suppressHover = false
-        // A drag reaching the hidden notch un-hides it — snap, the expand walk
-        // is about to move anyway.
-        policy.hideReasons.remove(.idle)
-        applyPresence(animated: false)
-        viewModel.selectedTab = .files
-        shelf.isDropTargeted = true
-        if !viewModel.isExpanded {
-            setExpanded(true)
+    private func updateLockState(_ locked: Bool) {
+        if locked {
+            // Order the desktop window out before touching its SwiftUI content.
+            panel.orderOut(nil)
+            setExpanded(false, animated: false)
+            musicSwipeRecognizer.reset()
+            musicFeedbackWork?.cancel()
+            viewModel.musicSwipe = nil
+            shelf.isDropTargeted = false
+            spectrum.stop()
+            refreshPresence(animated: false)
+            showLockBadge()
+        } else {
+            lockPanel?.orderOut(nil)
+            reposition()
         }
+    }
+
+    /// A separate window contains only a static label. The workbench never
+    /// moves to the lock screen's level or exposes its hosted view there.
+    private func showLockBadge() {
+        guard !isSuspended, !isUserDisabled, let geometry = viewModel.screenGeometry else {
+            lockPanel?.orderOut(nil)
+            return
+        }
+        let badgeSize = CGSize(width: 112, height: 32)
+        let badgeFrame = geometry.panelFrame(placement: .home, size: badgeSize)
+        let frame = geometry.clippedBelowMenuBar(badgeFrame.offsetBy(dx: 0, dy: -NotchLayout.islandTopGap))
+        guard !frame.isEmpty else { lockPanel?.orderOut(nil); return }
+        let badge: NotchPanel
+        if let lockPanel {
+            badge = lockPanel
+        } else {
+            badge = NotchPanel(contentRect: frame)
+            badge.ignoresMouseEvents = true
+            badge.canBecomeVisibleWithoutLogin = true
+            badge.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()) + 1)
+            badge.sharingType = .none
+            badge.contentView = NSHostingView(rootView: LockedNotchBadge())
+            lockPanel = badge
+        }
+        badge.setFrame(frame, display: true)
+        badge.orderFrontRegardless()
+    }
+
+    func suspendMonitors() {
+        guard !isSuspended else { return }
+        isSuspended = true
+        removeMonitors()
+        menuBarMonitor.stop()
+        panel.orderOut(nil)
+        lockPanel?.orderOut(nil)
+        shelf.isDropTargeted = false
+        setExpanded(false, animated: false)
+    }
+
+    func resumeMonitors() {
+        guard isSuspended else { return }
+        isSuspended = false
+        installMonitors()
+        reposition()
+        menuBarMonitor.start()
+    }
+
+    // MARK: - Shared geometry and input
+
+    private var interactiveRect: CGRect {
+        viewModel.activeIslandScreenRect(
+            panelFrame: panel.frame,
+            hasAudio: hasAudio,
+            activity: activities.current,
+            swipe: viewModel.musicSwipe,
+            timerText: pomodoro.pillText
+        )
+    }
+
+    private var compactHoverRect: CGRect {
+        guard let geometry = viewModel.screenGeometry else { return .zero }
+        let rect = interactiveRect
+        guard !rect.isEmpty else { return .zero }
+        let droppingDown = viewModel.shouldDropDownTransientActivity(
+            hasAudio: hasAudio, activity: activities.current,
+            swipe: viewModel.musicSwipe, timerText: pomodoro.pillText
+        )
+        if viewModel.isNotchFlankingMode && !viewModel.occupiesExpandedFootprint && !droppingDown {
+            // Extend vertically up to the screen edge and slightly down, never
+            // horizontally into adjacent app menus or status bar icons.
+            let topBleed = max(0, geometry.screenFrame.maxY - rect.maxY) + NotchLayout.hoverTopBleed
+            let bottomPad = NotchLayout.collapsedHoverInset
+            return CGRect(x: rect.minX, y: rect.minY - bottomPad,
+                          width: rect.width, height: rect.height + bottomPad + topBleed)
+        }
+        return geometry.clippedBelowMenuBar(
+            rect.insetBy(dx: -NotchLayout.collapsedHoverInset, dy: -NotchLayout.collapsedHoverInset)
+        )
+    }
+
+    private var pointerHitRect: CGRect {
+        viewModel.occupiesExpandedFootprint ? interactiveRect : compactHoverRect
+    }
+
+    private var expandedHoverRect: CGRect {
+        guard let geometry = viewModel.screenGeometry, !geometry.dockingFrame.isEmpty else { return .zero }
+        let expanded: CGRect
+        if viewModel.isNotchFlankingMode {
+            expanded = geometry.expandedWorkbenchRect(
+                inPanel: panel.frame, size: viewModel.expandedIslandSize, topGap: NotchLayout.expandedNotchTopGap
+            )
+        } else {
+            expanded = viewModel.placement.islandRect(
+                inPanel: panel.frame, size: viewModel.expandedIslandSize, gap: NotchLayout.islandTopGap
+            )
+        }
+        return geometry.clippedBelowMenuBar(
+            expanded.insetBy(dx: -NotchLayout.expandedHoverInset, dy: -NotchLayout.expandedHoverInset)
+        )
+    }
+
+    private var dropRect: CGRect {
+        guard desktopAvailable, let geometry = viewModel.screenGeometry else { return .zero }
+        if policy.hideReasons == [.idle] {
+            return geometry.clippedBelowMenuBar(
+                viewModel.placement.islandRect(
+                    inPanel: panel.frame, size: viewModel.expandedIslandSize, gap: NotchLayout.islandTopGap
+                )
+            )
+        }
+        return interactiveRect
+    }
+
+    private func localRect(_ rect: CGRect) -> CGRect {
+        guard !rect.isEmpty else { return .zero }
+        return container.convert(panel.convertFromScreen(rect), from: nil)
+    }
+
+    private func updateClickThrough(isFileDrag: Bool = false) {
+        guard desktopAvailable else { panel.ignoresMouseEvents = true; return }
+        let cursor = NSEvent.mouseLocation
+        if isFileDrag && viewModel.isExpanded && viewModel.isEditingWidgets {
+            panel.ignoresMouseEvents = false
+        } else if isFileDrag && dropRect.contains(cursor) {
+            panel.ignoresMouseEvents = false
+        } else {
+            panel.ignoresMouseEvents = policy.ignoresMouseEvents(
+                cursorInsideInteractiveRect: pointerHitRect.contains(cursor), hotkeyOverride: false
+            )
+        }
+    }
+
+    private func installMonitors() {
+        guard localMonitor == nil, globalMonitor == nil else { return }
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [
+            .mouseMoved, .leftMouseDown, .leftMouseDragged, .leftMouseUp, .scrollWheel, .keyDown,
+        ]) { [weak self] event in
+            guard let self else { return event }
+            if event.window === self.panel {
+                if event.type == .keyDown, event.keyCode == 53, self.viewModel.isExpanded {
+                    // Let the system text input method cancel marked text first.
+                    if (self.panel.firstResponder as? NSTextView)?.hasMarkedText() == true { return event }
+                    if self.viewModel.isEditingWidgets { self.viewModel.isEditingWidgets = false }
+                    else { self.setExpanded(false) }
+                    return nil
+                }
+                if event.type == .scrollWheel, self.handleMusicScroll(event) { return nil }
+            }
+            return self.handlePointer(event, local: true) ? nil : event
+        }
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [
+            .mouseMoved, .leftMouseDown, .leftMouseDragged, .leftMouseUp,
+        ]) { [weak self] event in
+            _ = self?.handlePointer(event, local: false)
+        }
+    }
+
+    private func removeMonitors() {
+        if let localMonitor { NSEvent.removeMonitor(localMonitor); self.localMonitor = nil }
+        if let globalMonitor { NSEvent.removeMonitor(globalMonitor); self.globalMonitor = nil }
+    }
+
+    /// Returns true only for local events owned by the compact island's press.
+    private func handlePointer(_ event: NSEvent, local: Bool) -> Bool {
+        guard desktopAvailable else { return false }
+        switch event.type {
+        case .mouseMoved:
+            evaluateHover()
+        case .leftMouseDown:
+            let ownEvent = local && event.window === panel
+            if viewModel.isExpanded {
+                // A SwiftUI Menu opens its own higher-level window.
+                if local, let window = event.window, window !== panel, window.level > panel.level { return false }
+                if expandedInteraction.dismissesOnClick(inside: ownEvent, pinned: viewModel.isPinned,
+                                                        editing: viewModel.isEditingWidgets) {
+                    setExpanded(false)
+                }
+            } else if ownEvent, compactHoverRect.contains(panel.convertPoint(toScreen: event.locationInWindow)) {
+                if event.clickCount >= 2 { presentDashboard() }
+                return true
+            }
+        case .leftMouseDragged:
+            updateClickThrough(isFileDrag: true)
+        case .leftMouseUp:
+            evaluateHover()
+        default:
+            break
+        }
+        return false
+    }
+
+    private var preventsHoverCollapse: Bool {
+        shelf.isDropTargeted || viewModel.isEditingWidgets || viewModel.isPinned
+            || viewModel.isInteractionLocked || viewModel.holdsIslandOpen
+    }
+
+    private func evaluateHover() {
+        let cursor = NSEvent.mouseLocation
+        if viewModel.isExpanded {
+            let shouldCollapse = expandedInteraction.updatePointer(
+                inside: expandedHoverRect.contains(cursor), heldOpen: preventsHoverCollapse
+            )
+            if !shouldCollapse {
+                cancelScheduledCollapse()
+            } else if collapseWorkItem == nil {
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    self.collapseWorkItem = nil
+                    guard self.viewModel.isExpanded, self.expandedInteraction.updatePointer(
+                        inside: self.expandedHoverRect.contains(NSEvent.mouseLocation),
+                        heldOpen: self.preventsHoverCollapse
+                    ) else { return }
+                    self.setExpanded(false)
+                }
+                collapseWorkItem = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + NotchLayout.collapseDelay, execute: work)
+            }
+        } else {
+            let hovering = compactHoverRect.contains(cursor)
+            if viewModel.isHovering != hovering { viewModel.isHovering = hovering }
+        }
+        refreshPresence(animated: false)
+    }
+
+    private func cancelScheduledCollapse() {
+        collapseWorkItem?.cancel()
+        collapseWorkItem = nil
+    }
+
+    // MARK: - File drops
+
+    private func handleDragEntered() -> Bool {
+        guard desktopAvailable else { return false }
+        cancelScheduledCollapse()
+        shelf.isDropTargeted = true
+        showPage(.files)
+        setExpanded(true)
+        return true
     }
 
     private func handleDragExited() {
         shelf.isDropTargeted = false
-        scheduleCollapse()
+        evaluateHover()
     }
 
     private func handleDrop(_ urls: [URL]) {
         shelf.isDropTargeted = false
-        viewModel.selectedTab = .files
-        for url in urls {
-            shelf.add(url)
-        }
+        guard desktopAvailable else { return }
+        showPage(.files)
+        urls.forEach(shelf.add)
         Haptics.perform(.generic)
-        if !urls.isEmpty {
-            activities.fileReceived(count: urls.count)
-        }
+        activities.fileReceived(count: urls.count)
     }
 
-    private func scheduleCollapse() {
-        collapseWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.collapseWorkItem = nil
-            self?.setExpanded(false)
-        }
-        collapseWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + NotchLayout.collapseDelay, execute: work)
+    // MARK: - Workbench routes
+
+    func presentDashboard(editing: Bool = false) {
+        guard preparePresentation(resumeIfPaused: true) else { return }
+        showDashboard()
+        viewModel.isEditingWidgets = editing
+        showKeyPanel()
     }
 
-    // MARK: - Trackpad gestures
-
-    private func installScrollMonitor() {
-        // Local monitor: fires when the scroll lands on the panel (cursor over the
-        // interactive island rect). Handles open *and* close and consumes the event.
-        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-            guard let self, event.window === self.panel else { return event }
-            return self.handleIslandScroll(event) ? nil : event
-        }
-        // Global monitor: while collapsed, a two-finger swipe-down should also open
-        // the notch anywhere within the *expanded* notch footprint — not just over
-        // the small pill. Outside the pill `NotchContainerView.hitTest` returns nil
-        // (so clicks fall through), which means the local monitor never sees those
-        // scrolls; the global monitor catches them. Global monitors are observe-only
-        // (they can't consume the event), which is fine for a mere open.
-        scrollMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-            self?.handleBigNotchRegionScroll(event)
-        }
+    func presentTimer() {
+        guard preparePresentation(resumeIfPaused: true) else { return }
+        showPage(.timer, widget: .timer)
+        showKeyPanel()
     }
 
-    /// Handle a deliberate swipe on the island itself. Returns whether it was
-    /// consumed. Natural scrolling: two fingers down -> dy > 0 -> open; while
-    /// expanded, a horizontal swipe pages between tabs.
-    private func handleIslandScroll(_ event: NSEvent) -> Bool {
-        // Both gestures are named for the island, not the screen: `opening`
-        // pulls it out of whichever border it is on, `paging` runs along that
-        // border — the same direction the tab strip reads. On the top edge
-        // that is the old down-to-open, sideways-to-page pair exactly.
-        let dock = placement.dock
-        let opening = dock.openingAmount(dx: event.scrollingDeltaX, dy: event.scrollingDeltaY)
-        let paging = dock.pagingAmount(dx: event.scrollingDeltaX, dy: event.scrollingDeltaY)
-        let threshold = NotchLayout.gestureScrollThreshold
-
-        // Swipe along the border while expanded -> page between tabs. Fire only
-        // on the first event of a gesture so momentum doesn't skip through
-        // several tabs.
-        if viewModel.isExpanded, abs(paging) > threshold, abs(paging) > abs(opening) {
-            let now = Date()
-            let isNewGesture = now.timeIntervalSince(lastHorizontalScroll) > NotchLayout.tabSwipeGestureGap
-            lastHorizontalScroll = now
-            if isNewGesture { pageTab(next: paging < 0) }
-            return true
-        }
-
-        // Swipe across it -> expand / collapse.
-        guard abs(opening) > threshold, abs(opening) > abs(paging) else { return false }
-        if opening > 0 {
-            // Swiping only ever opens the island — it no longer carries on into
-            // the fullscreen takeover. That third step is a click on the
-            // spectrum page, and Escape brings it home; a scroll gesture landing
-            // you in a full-screen visual you didn't ask for was too easy to
-            // trigger by accident. ⌥⌘S remains the keyboard route.
-            expandViaGesture()
-        } else {
-            collapseViaGesture()
-        }
-        return true
+    func presentCapture() {
+        guard preparePresentation(resumeIfPaused: false) else { return }
+        showPage(.capture)
+        showKeyPanel()
+        viewModel.requestCaptureFocus()
     }
 
-    /// Move the tab selection one step, clamped to the ends (no wrap-around).
-    /// `next` advances toward the last enabled tab; `!next` toward the first.
-    private func pageTab(next: Bool) {
-        let tabs = NotchViewModel.enabledTabs
-        guard let index = tabs.firstIndex(of: viewModel.selectedTab) else { return }
-        let target = index + (next ? 1 : -1)
-        guard tabs.indices.contains(target) else { return }
-        Haptics.perform(.alignment)
-        withAnimation(NotchLayout.tabChangeAnimation) { viewModel.selectedTab = tabs[target] }
+    func presentQuickActions() {
+        guard preparePresentation(resumeIfPaused: true) else { return }
+        viewModel.isEditingWidgets = false
+        viewModel.isInteractionLocked = false
+        viewModel.quickActionError = nil
+        viewModel.showsQuickActions = true
+        showKeyPanel()
     }
 
-    /// Open the collapsed notch from a swipe-down that lands anywhere within the
-    /// expanded-notch footprint (the "big notch" boundary), where the local monitor
-    /// can't see the event because hit-testing lets it fall through.
-    private func handleBigNotchRegionScroll(_ event: NSEvent) {
-        guard !menuBarOverlapActive, !isSafariDodged, !isUserDisabled, !viewModel.isExpanded else { return }
-        let dock = placement.dock
-        let opening = dock.openingAmount(dx: event.scrollingDeltaX, dy: event.scrollingDeltaY)
-        let paging = dock.pagingAmount(dx: event.scrollingDeltaX, dy: event.scrollingDeltaY)
-        guard opening > 0, abs(opening) > NotchLayout.gestureScrollThreshold, abs(opening) > abs(paging) else { return }
-        guard let rect = islandScreenRect(expanded: true), rect.contains(NSEvent.mouseLocation) else { return }
-        expandViaGesture()
+    private func preparePresentation(resumeIfPaused: Bool) -> Bool {
+        guard !SystemStatus.shared.isLocked, !isSuspended,
+              !SpectrumFullscreen.shared.isPresented else { return false }
+        if resumeIfPaused, isUserDisabled { setUserDisabled(false) }
+        return desktopAvailable
     }
 
-    private func expandViaGesture() {
-        suppressHover = false
-        collapseWorkItem?.cancel()
-        guard !viewModel.isExpanded else { return }
-        // A swipe can arrive while the pill is still idle-hidden (the reveal
-        // and the gesture race on the same mouse position) — un-hide first.
-        policy.hideReasons.remove(.idle)
-        applyPresence(animated: false)
+    private func showKeyPanel() {
+        expandedInteraction = ExpandedInteraction(awaitingPointerEntry: true)
         setExpanded(true)
+        panel.makeKeyAndOrderFront(nil)
     }
 
-    private func collapseViaGesture() {
-        collapseWorkItem?.cancel()
-        guard viewModel.isExpanded else { return }
-        suppressHover = true
-        setExpanded(false)
+    private func showDashboard() {
+        closeQuickActions()
+        viewModel.selectedWidget = nil
+        viewModel.showsDashboard = true
     }
 
-    // MARK: - State
-
-    /// The expand/collapse stage sequence, most-collapsed first. Both
-    /// directions walk this list one step at a time (`advanceStaging`), so the
-    /// collapse — panel → tab band → solo tab → lone icon → pill — plays in
-    /// exact reverse when opening.
-    private static let stageOrder: [NotchViewModel.IslandState] =
-        [.collapsed, .condensing, .solo, .band, .expanded]
-
-    /// Walk the island one stage at a time toward the given end state. Called
-    /// repeatedly by hover/gesture; re-targeting mid-walk just reverses from
-    /// wherever we are. `staged: false` jumps straight there (the capture
-    /// hotkey wants the field open now, not after the staged reveal).
-    private func setExpanded(_ expanded: Bool, staged: Bool = true) {
-        let target: NotchViewModel.IslandState = expanded ? .expanded : .collapsed
-        // Any collapse ends the hotkey's "interactive regardless of cursor"
-        // override; the next updateClickThrough re-derives the gate normally.
-        if !expanded { captureHotkeyActive = false }
-
-        guard viewModel.islandState != target else {
-            // Already there — make sure no stale walk keeps running.
-            stageWorkItem?.cancel(); stageWorkItem = nil
-            stagingTarget = nil
-            return
-        }
-        guard staged else {
-            stageWorkItem?.cancel(); stageWorkItem = nil
-            pagesWorkItem?.cancel(); pagesWorkItem = nil
-            stagingTarget = nil
-            withAnimation(NotchLayout.islandExpandAnimation) { viewModel.islandState = target }
-            // The hotkey jump wants its content now (the capture field is the
-            // whole point); the mount hitch is acceptable without a walk.
-            if expanded { viewModel.pagesSettled = true }
-            Haptics.perform(.levelChange)
-            updateClickThrough()
-            return
-        }
-        guard stagingTarget != target else { return }  // already walking there
-        stageWorkItem?.cancel(); stageWorkItem = nil
-        pagesWorkItem?.cancel(); pagesWorkItem = nil
-        stagingTarget = target
-        // One tap the moment the morph is triggered — not per stage, which felt
-        // like too much.
-        Haptics.perform(.levelChange)
-        advanceStaging()
+    private func showPage(_ tab: NotchViewModel.Tab, widget: DashboardWidget? = nil) {
+        closeQuickActions()
+        viewModel.isEditingWidgets = false
+        viewModel.selectedWidget = widget
+        viewModel.selectedTab = tab
+        viewModel.showsDashboard = false
     }
 
-    /// Move the island one stage toward `stagingTarget`, then schedule the next
-    /// step after that stage's rest delay. The final step lands on the target
-    /// and ends the walk.
-    private func advanceStaging() {
-        guard let target = stagingTarget,
-              let current = Self.stageOrder.firstIndex(of: viewModel.islandState),
-              let goal = Self.stageOrder.firstIndex(of: target)
-        else { return }
-        guard current != goal else {
-            stagingTarget = nil; stageWorkItem = nil
+    private func closeQuickActions() {
+        pendingAppLaunch = nil
+        viewModel.quickActionError = nil
+        viewModel.showsQuickActions = false
+    }
+
+    private func runQuickAction(_ action: QuickAction) {
+        guard desktopAvailable, viewModel.showsQuickActions else { return }
+        switch action {
+        case .dashboard: showDashboard()
+        case .music: showPage(.music, widget: .music)
+        case .spectrum: showPage(.spectrum)
+        case .timer: showPage(.timer, widget: .timer)
+        case .files: showPage(.files)
+        case .capture: presentCapture()
+        case .tasks:
+            setExpanded(false)
+            DailyTasksWindow.shared.show()
+        case .widgets:
+            setExpanded(false)
+            WidgetPreferencesWindow.shared.show()
+        case .settings:
+            setExpanded(false)
+            onOpenSettings?()
+        case let .app(url):
+            openApplication(url)
+        }
+    }
+
+    private func openApplication(_ url: URL) {
+        guard pendingAppLaunch == nil, url.isFileURL, url.pathExtension.lowercased() == "app" else { return }
+        let launchMessage = "无法打开该应用。请检查应用是否仍在原位置。"
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            viewModel.quickActionError = launchMessage
             return
         }
-
-        let expanding = goal > current
-        let next = Self.stageOrder[current + (expanding ? 1 : -1)]
-        traceStage(next, expanding: expanding)
-
-        if next == .collapsed {
-            // Handover to the pill: no withAnimation — the condensed icon and
-            // the pill are visually identical; the content transition fades on
-            // its own explicit clock (no crossfade dip).
-            //
-            // Unless a live activity owns the pill, and then they are not
-            // identical at all: the collapsed capsule is the activity's own
-            // 220–264 pt, so landing without an animation jumped the silhouette
-            // ~200 pt wide in a single frame. Every other way an activity
-            // arrives or leaves morphs (see `ActivityManager`), so this one
-            // does too.
-            if activities.current != nil {
-                withAnimation(NotchLayout.islandMorphAnimation) { viewModel.islandState = .collapsed }
-            } else {
-                viewModel.islandState = .collapsed
-            }
-        } else {
-            // The final expand hop is the only stage that rests, so it alone
-            // gets the overshoot-and-settle spring; intermediate hops are
-            // re-animated right away and would turn overshoot into wobble.
-            let animation: Animation = if expanding {
-                next == .expanded ? NotchLayout.islandExpandFinalAnimation : NotchLayout.islandExpandAnimation
-            } else {
-                NotchLayout.islandCollapseAnimation
-            }
-            withAnimation(animation) {
-                viewModel.islandState = next
-            }
-        }
-        updateClickThrough()
-
-        guard next != target else {
-            stagingTarget = nil; stageWorkItem = nil
-            if next == .collapsed {
-                // The collapse has landed: re-apply a deferred Safari dodge
-                // (a capture recentred the panel), then — with nothing to show
-                // and the cursor away — fade the pill out entirely.
-                applySafariDodge()
-                refreshIdlePresence()
-            }
-            if next == .expanded {
-                // The walk has landed: let the final spring's fast phase play
-                // out on the empty island, then mount the page carousel into
-                // a nearly still frame (see `pagesSettleDelay`).
-                let work = DispatchWorkItem { [weak self] in
-                    self?.pagesWorkItem = nil
-                    self?.viewModel.pagesSettled = true
+        let token = UUID()
+        pendingAppLaunch = token
+        viewModel.quickActionError = nil
+        NSWorkspace.shared.openApplication(at: url, configuration: .init()) { [weak self] _, error in
+            DispatchQueue.main.async {
+                guard let self, self.pendingAppLaunch == token, self.desktopAvailable else { return }
+                self.pendingAppLaunch = nil
+                if error != nil {
+                    self.viewModel.quickActionError = launchMessage
+                    self.panel.makeKeyAndOrderFront(nil)
+                } else {
+                    self.setExpanded(false)
                 }
-                pagesWorkItem = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + NotchLayout.pagesSettleDelay, execute: work)
             }
-            return
         }
-        let delay = stageRestDelay(entering: next, expanding: expanding)
-        guard delay > 0 else {
-            // A skipped (no-op) stage: advance synchronously so the state
-            // writes coalesce into the same SwiftUI transaction — the first
-            // *visible* hop then animates in the very frame the walk started,
-            // instead of one runloop turn per skipped stage. Recursion is
-            // bounded by the stage list, and nothing is scheduled that could
-            // need cancelling.
-            advanceStaging()
-            return
-        }
-        let work = DispatchWorkItem { [weak self] in self?.advanceStaging() }
-        stageWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    private var lastStageAt: CFAbsoluteTime = 0
-
-    /// Wall-clock trace of the staged walk. The rests are scheduled on the main
-    /// queue, so a stage that takes longer than its constant is main-thread
-    /// contention, not a mistuned animation — telling those two apart is the
-    /// whole point of printing the measured delta beside the nominal one.
-    private func traceStage(_ next: NotchViewModel.IslandState, expanding: Bool) {
-        #if DEBUG
-        let now = CFAbsoluteTimeGetCurrent()
-        let delta = lastStageAt == 0 ? 0 : (now - lastStageAt) * 1000
-        lastStageAt = now
-        fputs(String(format: "[stage] %@ %@ +%.0f ms (hero %@, signal %@, playing %@, timer %@)\n",
-                     expanding ? "→" : "←", "\(next)", delta,
-                     hasAudioHero ? "y" : "n", spectrum.hasSignal ? "y" : "n",
-                     nowPlaying.isPlaying ? "y" : "n", pomodoro.pillText ?? "-"), stderr)
-        #endif
+    private func setExpanded(_ expanded: Bool, animated: Bool = true) {
+        cancelScheduledCollapse()
+        if viewModel.isHovering { viewModel.isHovering = false }
+        if !expanded {
+            expandedInteraction = ExpandedInteraction()
+            viewModel.isPinned = false
+            viewModel.isEditingWidgets = false
+            viewModel.isInteractionLocked = false
+            closeQuickActions()
+        }
+        let target: NotchViewModel.IslandState = expanded ? .expanded : .collapsed
+        if viewModel.islandState != target {
+            let animation: Animation? = animated && !Motion.isReduced ? .spring(response: 0.26, dampingFraction: 0.88) : nil
+            withAnimation(animation) { viewModel.islandState = target }
+        }
+        if expanded { viewModel.pagesSettled = true }
+        panel.allowsKeyboardFocus = expanded
+        refreshPresence(animated: animated)
+        if !expanded && panel.isKeyWindow {
+            panel.orderOut(nil)
+            if desktopAvailable { panel.orderFrontRegardless() }
+        }
     }
 
-    /// How long to rest in an intermediate stage before advancing. Expand rests
-    /// are shorter than collapse rests so opening stays responsive on hover.
-    ///
-    /// Stages that are pure no-ops for the current content skip their rest:
-    /// with the pill hero active (music, other system audio, or the focus
-    /// timer), `.condensing` and `.solo` have the pill's own geometry *and*
-    /// show the very same persistent hero view — resting there is dead time
-    /// the eye reads as hover lag on expand (200 ms of nothing before the
-    /// island moved) and as a stale oversized hit rect after collapse.
-    private func stageRestDelay(entering state: NotchViewModel.IslandState, expanding: Bool) -> TimeInterval {
-        let heroContent = hasAudioHero || pomodoro.pillText != nil
-        switch (state, expanding) {
-        case (.band, false):       return NotchLayout.bandCollapseDelay
-        case (.solo, false):       return NotchLayout.soloCollapseDelay
-        case (.condensing, false): return heroContent ? 0 : NotchLayout.condenseSwapDelay
-        case (.condensing, true):  return heroContent ? 0 : NotchLayout.condenseExpandDelay
-        case (.solo, true):        return heroContent ? 0 : NotchLayout.soloExpandDelay
-        case (.band, true):        return NotchLayout.bandExpandDelay
-        default:                   return 0
+    // MARK: - Track changes
+
+    private func handleMusicScroll(_ event: NSEvent) -> Bool {
+        guard desktopAvailable, !policy.isHidden, WidgetStore.shared.layout.swipeTracks,
+              nowPlaying.track != nil, !viewModel.isEditingWidgets, !viewModel.showsQuickActions,
+              (viewModel.isExpanded ? expandedHoverRect : compactHoverRect).contains(panel.convertPoint(toScreen: event.locationInWindow)),
+              !viewModel.isExpanded || (!viewModel.showsDashboard && viewModel.selectedTab == .music) else { return false }
+        let direction = event.isDirectionInvertedFromDevice ? 1.0 : -1.0
+        let dx = Double(event.scrollingDeltaX) * direction
+        let dy = Double(event.scrollingDeltaY) * direction
+        let horizontal = abs(dx) > abs(dy) * 1.2
+        let swipe = musicSwipeRecognizer.consume(dx: dx, dy: dy, time: event.timestamp,
+            precise: event.hasPreciseScrollingDeltas, began: event.phase.contains(.began),
+            ended: event.phase.contains(.ended) || event.phase.contains(.cancelled), momentum: !event.momentumPhase.isEmpty)
+        if let swipe {
+            if swipe == .next { nowPlaying.nextTrack() } else { nowPlaying.previousTrack() }
+            withAnimation(Motion.isReduced ? nil : .easeOut(duration: 0.15)) { viewModel.musicSwipe = swipe }
+            musicFeedbackWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                withAnimation(Motion.isReduced ? nil : .easeOut(duration: 0.18)) { self?.viewModel.musicSwipe = nil }
+            }
+            musicFeedbackWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: work)
         }
+        return horizontal
+    }
+}
+
+private struct LockedNotchBadge: View {
+    var body: some View {
+        Label("已锁定", systemImage: "lock.fill")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.black, in: Capsule())
+            .overlay(Capsule().strokeBorder(.white.opacity(0.18)))
+            .accessibilityLabel("Mac 已锁定")
     }
 }

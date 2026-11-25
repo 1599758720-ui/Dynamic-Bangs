@@ -1,23 +1,44 @@
+import AppKit
 import SwiftUI
 
 struct NotchSettings: View {
     @ObservedObject var settings: UserSettings
+    @ObservedObject private var widgets = WidgetStore.shared
+    @State private var axGranted = MenuBarOverlapMonitor.hasAccessibilityPermission
+
+    private var currentArea: MenuBarSafeArea? {
+        ScreenManager.targetScreen().map(ScreenManager.safeArea(for:))
+    }
 
     var body: some View {
         Form {
-            Section {
-                ForEach(NotchViewModel.Tab.allCases, id: \.self) { tab in
-                    Toggle(tab.title, isOn: tabBinding(tab))
-                        // The last enabled tab can't be switched off — the
-                        // notch always needs at least one page.
-                        .disabled(settings.isTabEnabled(tab) && NotchViewModel.enabledTabs.count == 1)
+            Section("实体刘海贴合与菜单栏避让") {
+                if let notch = currentArea?.notch {
+                    Text("已检测实体刘海（宽 \(Int(notch.width)) 点，菜单栏高 \(Int(ScreenManager.menuBarHeight)) 点）")
+                } else {
+                    Text("当前屏幕无实体刘海（菜单栏高 \(Int(ScreenManager.menuBarHeight)) 点，悬浮于菜单栏下方）")
                 }
-            } header: {
-                Text(String(localized: "settings.tabs.header", defaultValue: "Tabs"))
-            } footer: {
-                Text(String(localized: "settings.tabs.hint", defaultValue: "Deaktivierte Tabs verschwinden aus der Notch. Mindestens ein Tab bleibt immer aktiv."))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Stepper("收起高度微调：\(Int(settings.notchHeightExtra)) 点", value: $settings.notchHeightExtra, in: -1...6, step: 1)
+                LabeledContent("右侧状态图标避让", value: "已启用（自动检测）")
+                LabeledContent("左侧应用菜单避让", value: axGranted ? "已启用（辅助功能已授权）" : "精简宽度（授权后可按应用菜单精确避让）")
+                if !axGranted {
+                    Button("开启辅助功能权限…") {
+                        MenuBarOverlapMonitor.requestAccessibilityPermission()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                            axGranted = MenuBarOverlapMonitor.hasAccessibilityPermission
+                        }
+                    }
+                }
+                Text("收起态贴合实体刘海左右，与菜单栏同高；展开时使用菜单栏下方空间。两侧拥挤时会自动精简或让位，优先保住系统状态图标和应用菜单。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("组件与缩略显示") {
+                Button("配置组件、顺序与左右缩略信息…") { WidgetPreferencesWindow.shared.show() }
+                Text("默认固定贴合在实体刘海左右居中位置。双击展开工作台，按 ⌥⌘K 打开快速搜索。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("已显示：" + widgets.layout.widgets.map(\.title).joined(separator: "、"))
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section {
@@ -35,10 +56,6 @@ struct NotchSettings: View {
                     .foregroundStyle(.secondary)
             }
 
-            // Also in the status menu. Here as well because this is where you
-            // look for it after dragging the island somewhere you regret, and
-            // the status menu is the one surface a mis-placed notch can sit on
-            // top of.
             Section {
                 Button(String(localized: "settings.notch.resetPlacement", defaultValue: "Notch mittig nach oben")) {
                     NotificationCenter.default.post(name: .notchResetPlacement, object: nil)
@@ -49,6 +66,7 @@ struct NotchSettings: View {
         }
         .formStyle(.grouped)
         .padding()
+        .onAppear { axGranted = MenuBarOverlapMonitor.hasAccessibilityPermission }
     }
 
     private func tabBinding(_ tab: NotchViewModel.Tab) -> Binding<Bool> {

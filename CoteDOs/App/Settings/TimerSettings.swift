@@ -20,7 +20,7 @@ struct TimerSettings: View {
                             .labelsHidden()
                             .help(String(localized: "settings.timer.isFocusHint", defaultValue: "Zählt als Fokuszeit"))
                         Stepper(value: $preset.minutes, in: 1...180) {
-                            Text(String(localized: "settings.timer.minutes", defaultValue: "\(preset.minutes) min"))
+                            Text("\(preset.minutes) 分钟")
                                 .monospacedDigit()
                                 .frame(minWidth: 56, alignment: .trailing)
                         }
@@ -30,7 +30,7 @@ struct TimerSettings: View {
                             Image(systemName: "minus.circle.fill")
                                 .foregroundStyle(.secondary)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.plain).accessibilityLabel("移除计时预设：" + preset.name)
                     }
                 }
                 .onMove { settings.timerPresets.move(fromOffsets: $0, toOffset: $1) }

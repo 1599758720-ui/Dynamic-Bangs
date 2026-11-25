@@ -64,6 +64,15 @@ final class PomodoroManager: ObservableObject {
     /// segment from this string's length, so the format is fixed per session
     /// (chosen from the duration, see `timeString`) and never jitters mid-run.
     @Published private(set) var pillText: String?
+
+    /// The compact workbench always communicates remaining time, even when the
+    /// detailed timer is configured to count elapsed time upward.
+    var remainingText: String? {
+        guard phase != .idle, duration > 0 else { return nil }
+        return Self.timeString(max(0, Int((duration - elapsed).rounded(.up))),
+                               style: duration >= 3600 ? .hours : .minutes)
+    }
+
     /// Elapsed fraction 0…1 — fills up in both count directions.
     @Published private(set) var progress: Double = 0
     /// The preset highlighted in the timer tab (the start target while idle).

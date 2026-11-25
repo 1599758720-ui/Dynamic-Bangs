@@ -30,9 +30,10 @@ final class ActivityManager: ObservableObject {
 
     /// Present an activity unless a higher-priority one is already showing.
     func present(_ activity: NotchActivity) {
-        guard settings.liveActivitiesEnabled else { return }
+        let systemEvent = activity.kind == .focus || activity.kind == .unlocked
+        guard systemEvent ? WidgetStore.shared.layout.systemStatusEnabled : settings.liveActivitiesEnabled else { return }
         if let current, current.priority > activity.priority { return }
-        withAnimation(NotchLayout.islandMorphAnimation) {
+        withAnimation(Motion.isReduced ? nil : NotchStyle.spring) {
             current = activity
         }
         scheduleDismiss(after: activity.autoDismiss)
@@ -40,7 +41,7 @@ final class ActivityManager: ObservableObject {
 
     func dismiss() {
         dismissWork?.cancel()
-        withAnimation(NotchLayout.islandMorphAnimation) {
+        withAnimation(Motion.isReduced ? nil : NotchStyle.spring) {
             current = nil
         }
     }

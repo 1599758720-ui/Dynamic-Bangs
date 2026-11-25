@@ -315,7 +315,7 @@ enum NotchLayout {
     /// The same for the fullscreen stage: the panel's page sits near the top of
     /// the screen, the fullscreen run in its middle.
     static func pageToFullscreenWaveOffset(screenSize: CGSize) -> CGFloat {
-        (islandTopGap + pageWaveCentreY) - screenSize.height / 2
+        (islandTopInset + pageWaveCentreY) - screenSize.height / 2
     }
 
     /// The same idea one step up: how small the fullscreen run starts so it
@@ -330,7 +330,7 @@ enum NotchLayout {
     /// the island's page: the island is collapsing at the same time, so aiming
     /// the run at a page that is busy disappearing left it landing on nothing.
     static func pillToFullscreenWaveOffset(screenSize: CGSize) -> CGFloat {
-        (islandTopGap + pillWaveCentreY) - screenSize.height / 2
+        (islandTopInset + pillWaveCentreY) - screenSize.height / 2
     }
 
     static func pillToFullscreenWaveScale(screenSize: CGSize) -> CGFloat {
@@ -347,17 +347,25 @@ enum NotchLayout {
         return full.waveHeight > 0 ? full.waveHeight : 1
     }
 
-    /// The collapsed height currently in effect. Views without a
-    /// `NotchViewModel` read this; the view model's `collapsedHeight` returns
-    /// the same value, so there is one formula. In spectrum-only mode it grows
-    /// with the width knob (see `pillSpectrumGeometry(forWidth:)`) — at the
-    /// default that is 30 pt, which with `islandTopGap` still sits inside a
-    /// physical notch's band; the widest settings deliberately hang below it,
-    /// since that mode exists to be watched.
+    /// The compact surface has its own height, adjusted by the user's preference.
     static var currentCollapsedHeight: CGFloat {
-        guard UserSettings.shared.pillSpectrumOnly else { return collapsedHeight }
-        return pillSpectrumGeometry(forWidth: UserSettings.shared.pillSpectrumWidth).pillHeight
+        max(compactMinimumHeight, compactBaseHeight + CGFloat(UserSettings.shared.notchHeightExtra))
     }
+    /// Thickness of the floating compact island at the default setting.
+    static let compactBaseHeight: CGFloat = 30
+    static let compactMinimumHeight: CGFloat = 26
+    /// The compact island's length lives in `IslandFootprint.compactWidth`
+    /// (pure, unit-tested alongside the menu-bar geometry).
+    /// Inner horizontal padding of the compact island's content row.
+    static let compactContentInset: CGFloat = 12
+    /// Corner radius of the open island — continuous, all four corners: it
+    /// floats cleanly below the menu bar rather than hanging off the screen edge.
+    static let floatingExpandedCornerRadius: CGFloat = 28
+    /// Bottom corner radius of the top-joined compact notch-flanking bar.
+    static let notchFlankBottomCornerRadius: CGFloat = 13
+    /// Breathing gap between the menu bar's bottom edge and the expanded
+    /// workbench card when opened from the physical notch.
+    static let expandedNotchTopGap: CGFloat = 4
     /// Font size of the shelf badge's item count in the collapsed pill.
     static let collapsedBadgeFontSize: CGFloat = 9
     /// The shelf badge (tray icon + item count, up to ~2 digits).
@@ -385,8 +393,11 @@ enum NotchLayout {
     /// in particular) from the island edge, clearing the rounded corners.
     static let expandedContentInset: CGFloat = 16
 
-    static let expandedWidth: CGFloat = 460
-    static let expandedHeight: CGFloat = 212
+    static let workbenchWidth: CGFloat = 656
+    static var expandedWidth: CGFloat { min(workbenchWidth, (ScreenManager.targetScreen()?.frame.width ?? (workbenchWidth + panelHorizontalMargin)) - panelHorizontalMargin) }
+    /// The open island no longer reaches up behind the camera housing — it
+    /// opens below the menu bar — so its height is all content.
+    static let expandedHeight: CGFloat = 332
 
     /// The open island standing on a side border.
     ///
@@ -606,10 +617,14 @@ enum NotchLayout {
 
     // MARK: Island silhouette (iPhone Dynamic Island style)
 
-    /// Gap between the physical top screen edge and the island — like the
-    /// iPhone's Dynamic Island floating in the status bar. Identical in both
-    /// states so the top edge stays put while the island morphs.
-    static let islandTopGap: CGFloat = 2
+    /// Clearance between the usable area's edge and the island.
+    static let islandTopGap: CGFloat = 6
+
+    /// Top inset of the home position used by the fullscreen spectrum morph.
+    static var islandTopInset: CGFloat {
+        let area = ScreenManager.targetScreen().map(ScreenManager.safeArea(for:))
+        return (area?.menuBarHeight ?? MenuBarSafeArea.minimumMenuBarHeight) + (area?.notch == nil ? islandTopGap : 0)
+    }
     /// Expanded corner radius — the iPhone's expanded Live Activity uses ~40pt;
     /// slightly tighter here since the panel band is denser.
     static let expandedCornerRadius: CGFloat = 36
@@ -636,29 +651,7 @@ enum NotchLayout {
     /// island's shadow has room to render. Only the island animates inside.
     /// The vertical margin also absorbs the top gap the island floats below.
     static let panelHorizontalMargin: CGFloat = 60
-    static var panelVerticalMargin: CGFloat { 24 + islandTopGap }
-
-    // MARK: Dragging the island to another border
-
-    /// How far the cursor must travel with the button down before a press on
-    /// the island becomes a drag of the whole panel. Small enough that dragging
-    /// feels immediate, large enough that a click with a shaky hand is still a
-    /// click.
-    static let panelDragThreshold: CGFloat = 4
-    /// Within this much of an edge's centre a released drag lands exactly
-    /// centred — the way back to the notch's home pose without aiming.
-    static let dockCentreSnap: CGFloat = 14
-    /// And within this much of either *end* of a border it goes into that
-    /// corner. Wider than the centre snap because a corner is a bigger target
-    /// to want and a harder one to hit: the island cannot be dragged past the
-    /// screen edge, so the gesture is "shove it into the corner" rather than
-    /// "place it exactly".
-    static let dockCornerSnap: CGFloat = 48
-    /// The glide onto the border once the button comes up. The panel's frame
-    /// (AppKit) and the island's alignment inside it (SwiftUI) both animate,
-    /// so they share one duration or the island slides out of its own panel.
-    static let dockSettleDuration: TimeInterval = 0.22
-    static var dockSettleAnimation: Animation { Motion.gate(.easeInOut(duration: dockSettleDuration)) }
+    static var panelVerticalMargin: CGFloat { 48 + islandTopGap }
 
     // MARK: Safari fullscreen dodge
 
@@ -696,7 +689,7 @@ enum NotchLayout {
     /// any other `PanelPresencePolicy` transition that may animate).
     static let idleHideFadeDuration: TimeInterval = 0.25
     /// Delay before collapsing after a drag exits, so brief exits don't flicker.
-    static let collapseDelay: TimeInterval = 0.12
+    static let collapseDelay: TimeInterval = 0.35
     /// Grace period before the island force-closes after the cursor leaves
     /// while the capture field is still focused (e.g. right after submitting
     /// a note, which re-focuses it for the next thought). Long enough to

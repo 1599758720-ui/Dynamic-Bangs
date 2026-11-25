@@ -3,280 +3,120 @@ import SwiftUI
 
 struct NowPlayingView: View {
     @ObservedObject var nowPlaying: NowPlayingManager
-    /// Shared spectrum tap, owned by AppDelegate and driven centrally in
-    /// `NotchRootView` (so the collapsed pill's wave is live too). The music tab
-    /// just observes it.
-    @ObservedObject var spectrum: SpectrumAnalyzer
-    /// Local to the music tab: only needs to enumerate output devices while the
-    /// tab is on screen, so it starts/stops with the view.
+    let spectrum: SpectrumAnalyzer
+    @ObservedObject private var widgets = WidgetStore.shared
     @StateObject private var output = AudioOutputController()
-
-    /// Same battery trade as the wave's ease: the fill ticks once a second, so
-    /// a 1s ease is permanently in flight while the panel is open.
-    @ObservedObject private var power = PowerSource.shared
-
-    /// Scrub fraction while the progress bar is being dragged (nil = not dragging),
-    /// so the bar follows the finger before the seek lands.
     @State private var scrubFraction: Double?
-
-    /// True on a side border, where the page is tall and narrow.
-    ///
-    /// The cover, the title and the wave stack instead of sitting in a row:
-    /// side by side in a ~200 pt column the title had about 90 pt to live in
-    /// and truncated to "Slow Asce…", while the height above and below the
-    /// cluster went to waste. Stacked, the cover can be half again as big, the
-    /// title gets the full width, and the page fills out.
-    var portrait: Bool = false
+    var portrait = false
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
-        // Empty containers (Spacers + a narrower content column) pad the edges,
-        // top and bottom so the actual controls cluster closer together in the
-        // centre, while the island stays solid black.
-        VStack(spacing: 0) {
-            Spacer(minLength: 0)
-            VStack(spacing: 8) {
-                topRow
-                progressRow
-                controlsRow
+        VStack(spacing: 14) {
+            HStack(spacing: 24) {
+                Button(action: nowPlaying.openCurrentTrack) {
+                    MusicArtwork(url: nowPlaying.track?.artworkURL,
+                        playing: nowPlaying.isPlaying && nowPlaying.screensAwake,
+                        size: 118, appearance: widgets.layout.musicAppearance)
+                        .background {
+                            if !reduceTransparency, let color = nowPlaying.artworkColor {
+                                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                    .fill(color.opacity(0.44))
+                                    .padding(6)
+                                    .blur(radius: 17)
+                            }
+                        }
+                }.buttonStyle(.plain).accessibilityLabel("打开当前音乐播放器")
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 5) {
+                        Circle().fill(nowPlaying.isPlaying ? .green : NotchStyle.tertiary).frame(width: 4, height: 4)
+                        Text(nowPlaying.sourceName + (nowPlaying.isPlaying ? " · 正在播放" : " · 已暂停"))
+                            .font(.system(size: 9, weight: .medium)).foregroundStyle(NotchStyle.secondary)
+                    }
+                    Text(nowPlaying.track?.name ?? "等一首喜欢的歌")
+                        .font(.system(size: 18, weight: .bold)).lineLimit(2)
+                        .help(nowPlaying.track?.name ?? "打开网易云、Apple Music 或 Spotify 开始播放")
+                    Text(nowPlaying.track?.artist ?? "在播放器中开始播放，音乐会自动出现在这里")
+                        .font(.system(size: 12.5)).foregroundStyle(NotchStyle.secondary).lineLimit(1)
+                    if let album = nowPlaying.track?.album, !album.isEmpty {
+                        Text(album).font(.system(size: 10)).foregroundStyle(NotchStyle.tertiary).lineLimit(1)
+                    }
+                    HStack(spacing: 12) {
+                        ControlButton(systemName: "backward.fill", size: 13, label: "上一首", action: nowPlaying.previousTrack)
+                        ControlButton(systemName: nowPlaying.isPlaying ? "pause.fill" : "play.fill", size: 17,
+                                      diameter: 40, filled: true, label: nowPlaying.isPlaying ? "暂停" : "播放",
+                                      action: nowPlaying.playPause)
+                        ControlButton(systemName: "forward.fill", size: 13, label: "下一首", action: nowPlaying.nextTrack)
+                    }
+                    .disabled(nowPlaying.track == nil)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(spacing: 10) {
+                    outputPicker
+                    WidgetWave(spectrum: spectrum, active: nowPlaying.isPlaying && nowPlaying.screensAwake,
+                               color: nowPlaying.artworkColor ?? .pink, compact: true)
+                        .frame(height: 20)
+                }
+            }.frame(maxWidth: 520)
+            VStack(spacing: 2) {
+                Slider(value: Binding(get: { scrubFraction ?? nowPlaying.playbackFraction }, set: { scrubFraction = $0 }), in: 0...1) { editing in
+                    if !editing, let value = scrubFraction, let duration = nowPlaying.track?.duration {
+                        nowPlaying.seek(to: value * duration); scrubFraction = nil
+                    }
+                }.tint(.white).controlSize(.small).disabled((nowPlaying.track?.duration ?? 0) <= 0)
+                    .accessibilityLabel("歌曲播放进度")
+                HStack {
+                    Text(timeString((scrubFraction ?? nowPlaying.playbackFraction) * (nowPlaying.track?.duration ?? 0)))
+                    Spacer()
+                    if widgets.layout.swipeTracks { Text("两指左滑下一首 · 右滑上一首") }
+                    Spacer()
+                    Text(timeString(nowPlaying.track?.duration ?? 0))
+                }.font(.system(size: 10, weight: .medium)).monospacedDigit().foregroundStyle(NotchStyle.secondary)
+            }.frame(maxWidth: 520)
+            if let error = nowPlaying.commandError {
+                HStack {
+                    Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
+                    Text(error).font(.system(size: 10)).foregroundStyle(NotchStyle.secondary)
+                    Button("打开播放器", action: nowPlaying.openCurrentTrack).buttonStyle(NotchButtonStyle()).font(.system(size: 10))
+                }
             }
-            .frame(maxWidth: 300)
-            Spacer(minLength: 0)
+            if nowPlaying.permissionDenied {
+                Button("允许读取播放器状态…") {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")!)
+                }.buttonStyle(NotchButtonStyle()).font(.system(size: 11))
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { output.start() }
-        .onDisappear { output.stop() }
+        .onAppear { output.start() }.onDisappear { output.stop() }
     }
-
-    // MARK: Row 1 — cover · title/artist · wave
-
-    private var topRow: some View {
-        AxisStack(axis: portrait ? .vertical : .horizontal, spacing: 12) {
-            artwork
-
-            VStack(alignment: portrait ? .center : .leading, spacing: 2) {
-                if let track = nowPlaying.track {
-                    Text(track.name)
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                    Text(track.artist)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.55))
-                        .lineLimit(1)
-                } else if nowPlaying.permissionDenied {
-                    Text(String(localized: "nowplaying.denied", defaultValue: "Kein Zugriff auf den Player"))
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .lineLimit(1)
-                    Button(action: openAutomationSettings) {
-                        Text(String(localized: "nowplaying.denied.cta", defaultValue: "Automatisierung erlauben"))
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(Color.accentColor)
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandCursor(enabled: true)
-                } else {
-                    Text(nowPlaying.isRunning
-                         ? String(localized: "nowplaying.idle", defaultValue: "Nichts läuft")
-                         : String(localized: "nowplaying.notOpen", defaultValue: "Kein Player geöffnet"))
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.6))
-                        .lineLimit(1)
-                }
-            }
-
-            // Stacked, the wave sits under the title rather than off to one
-            // side, so there is nothing to push apart.
-            if !portrait { Spacer(minLength: 4) }
-
-            // Only the real track's accent when there's an actual track to
-            // derive it from — otherwise (system audio with no scriptable
-            // track) a stale accent from the last track shouldn't bleed in.
-            //
-            // `spectrum` is the shared tap and runs (and carries real bands)
-            // whenever the screen is awake — regardless of whether Spotify/Music
-            // is actually playing, e.g. while Safari plays a video with Spotify
-            // paused. Gate `bands` on `nowPlaying.isPlaying` too, or this tab
-            // shows someone else's audio moving under the paused track: `bands`
-            // must never be passed live when `isActive` is false, since
-            // `WaveBarsView` ignores `isActive` once it has real band data.
-            LiveWaveBarsView(
-                levels: spectrum.bands,
-                isLive: spectrum.isLive,
-                showsLiveBands: nowPlaying.isPlaying,
-                isActive: nowPlaying.isPlaying && nowPlaying.screensAwake,
-                tint: nowPlaying.track != nil ? nowPlaying.artworkColor : nil,
-                coverBars: nowPlaying.track != nil ? nowPlaying.coverBars : nil,
-                count: portrait ? 16 : 6
-            )
-            // Stacked under a full-width title, a 34 pt run reads as a row of
-            // dots rather than as a wave; across the column it reads as one.
-            .frame(width: portrait ? 140 : 34, height: 30)
-        }
-    }
-
-    /// Tapping the cover opens the song in its app (deep link, or brings the app
-    /// forward). Only interactive when there's actually a track.
-    private var artwork: some View {
-        Button(action: { nowPlaying.openCurrentTrack() }) {
-            Group {
-                if let url = nowPlaying.track?.artworkURL {
-                    // Cross-fade to the new cover on track change instead of
-                    // popping through the grey placeholder.
-                    AsyncImage(url: url, transaction: Transaction(animation: .easeInOut(duration: 0.2))) { phase in
-                        if let image = phase.image {
-                            image.resizable().scaledToFill()
-                        } else {
-                            placeholderArtwork
-                        }
-                    }
-                } else {
-                    placeholderArtwork
-                }
-            }
-            .frame(width: portrait ? 96 : 56, height: portrait ? 96 : 56)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.4), radius: 6, y: 3)
-        }
-        .buttonStyle(.plain)
-        .disabled(nowPlaying.track == nil)
-        .pointingHandCursor(enabled: nowPlaying.track != nil)
-    }
-
-    /// Deep-link straight to System Settings → Privacy & Security → Automation
-    /// so the user can re-enable our Apple Events access.
-    private func openAutomationSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    private var placeholderArtwork: some View {
-        RoundedRectangle(cornerRadius: 12)
-            .fill(Color.white.opacity(0.08))
-            .overlay(
-                Image(systemName: "music.note")
-                    .foregroundStyle(.white.opacity(0.4))
-            )
-    }
-
-    // MARK: Row 2 — current time · progress · total time
-
-    private var fraction: Double {
-        guard let duration = nowPlaying.track?.duration, duration > 0 else { return 0 }
-        return min(max(nowPlaying.position / duration, 0), 1)
-    }
-
-    /// What the bar shows: the drag position while scrubbing, else live playback.
-    private var displayedFraction: Double { scrubFraction ?? fraction }
-
-    private var progressRow: some View {
-        HStack(spacing: 8) {
-            timeLabel(displayedFraction * (nowPlaying.track?.duration ?? 0))
-            GeometryReader { geo in
-                let isScrubbing = scrubFraction != nil
-                // Minimal: a dim track and a bright filled bar; the play head is
-                // simply the end of the filled bar (no knob). The bar thickens a
-                // touch while scrubbing for feedback.
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.18))
-                    Capsule()
-                        .fill(Color.white.opacity(isScrubbing ? 1 : 0.9))
-                        .frame(width: max(0, geo.size.width * displayedFraction))
-                        // Ease the fill between the 1s local position ticks and
-                        // over the discontinuous jump when the 5s hard refresh
-                        // corrects the interpolated position — otherwise the bar
-                        // steps and snaps. No easing while scrubbing, so the bar
-                        // tracks the finger instantly.
-                        .animation(isScrubbing || power.isOnBattery ? nil : .linear(duration: 1), value: displayedFraction)
-                }
-                .frame(height: isScrubbing ? 5 : 3)
-                .frame(maxHeight: .infinity)   // enlarge the vertical hit area
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            guard nowPlaying.track?.duration ?? 0 > 0 else { return }
-                            scrubFraction = min(max(value.location.x / geo.size.width, 0), 1)
-                        }
-                        .onEnded { _ in
-                            if let f = scrubFraction, let d = nowPlaying.track?.duration {
-                                nowPlaying.seek(to: f * d)
-                            }
-                            scrubFraction = nil
-                        }
-                )
-                .animation(.easeOut(duration: 0.12), value: isScrubbing)
-            }
-            .frame(height: 14)
-            timeLabel(nowPlaying.track?.duration ?? 0)
-        }
-    }
-
-    private func timeLabel(_ seconds: TimeInterval) -> some View {
-        Text(timeString(seconds))
-            .font(.system(size: 9, weight: .medium))
-            .foregroundStyle(.white.opacity(0.45))
-            .frame(width: 30)
-    }
-
-    private func timeString(_ seconds: TimeInterval) -> String {
-        guard seconds.isFinite, seconds > 0 else { return "0:00" }
-        let total = Int(seconds)
-        return String(format: "%d:%02d", total / 60, total % 60)
-    }
-
-    // MARK: Row 3 — prev · play/pause · next · output picker
-
-    private var controlsRow: some View {
-        HStack(spacing: 16) {
-            ControlButton(systemName: "backward.fill", size: 15,
-                          label: String(localized: "control.previous", defaultValue: "Vorheriger Titel"),
-                          action: nowPlaying.previousTrack)
-            ControlButton(
-                systemName: nowPlaying.isPlaying ? "pause.fill" : "play.fill",
-                size: 20,
-                label: nowPlaying.isPlaying
-                    ? String(localized: "control.pause", defaultValue: "Pause")
-                    : String(localized: "control.play", defaultValue: "Abspielen"),
-                action: nowPlaying.playPause
-            )
-            ControlButton(systemName: "forward.fill", size: 15,
-                          label: String(localized: "control.next", defaultValue: "Nächster Titel"),
-                          action: nowPlaying.nextTrack)
-            outputPicker
-        }
-        .frame(maxWidth: .infinity, alignment: .center)
-    }
-
-    /// Audio-output selector: pick which device the sound plays through,
-    /// current one checked.
     private var outputPicker: some View {
         Menu {
             ForEach(output.devices) { device in
                 Button { output.select(device) } label: {
-                    if device.id == output.currentDeviceID {
-                        Label(device.name, systemImage: "checkmark")
-                    } else {
-                        Text(device.name)
-                    }
+                    if device.id == output.currentDeviceID { Label(device.name, systemImage: "checkmark") }
+                    else { Text(device.name) }
                 }
             }
         } label: {
             Image(systemName: "airplayaudio")
-                .accessibilityLabel(String(localized: "control.output", defaultValue: "Ausgabegerät"))
-                .font(.system(size: 14))
-                .foregroundStyle(.white.opacity(0.8))
-                .frame(width: 34, height: 32)
-                .contentShape(Rectangle())
+                .font(.system(size: 13)).frame(width: 32, height: 32)
+                .background(.white.opacity(0.095), in: Circle())
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .pointingHandCursor(enabled: true)
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .accessibilityLabel("选择音频输出").help("选择扬声器或耳机")
+    }
+    private func timeString(_ seconds: TimeInterval) -> String {
+        guard seconds.isFinite, seconds > 0 else { return "0:00" }
+        return String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
+    }
+}
+
+extension NowPlayingManager {
+    var playbackFraction: Double {
+        guard let duration = track?.duration, duration.isFinite, duration > 0, position.isFinite else { return 0 }
+        return min(max(position / duration, 0), 1)
+    }
+
+    var sourceName: String {
+        activeSourceID == .auto ? "音乐" : activeSourceID.localizedName
     }
 }

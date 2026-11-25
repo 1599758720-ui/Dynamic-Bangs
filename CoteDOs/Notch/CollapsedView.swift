@@ -1,239 +1,299 @@
 import SwiftUI
 
+/// Compact presentation in either notch-flanking mode (left & right of the
+/// physical camera housing at menu-bar height) or floating pill mode (external
+/// display, off-home dock, or dropped-down transient activity).
+///
+/// Double-click and panel dragging are handled by AppKit. The button provides
+/// the same open action to assistive technology.
 struct CollapsedView: View {
     @ObservedObject var viewModel: NotchViewModel
     @ObservedObject var nowPlaying: NowPlayingManager
-    @ObservedObject var shelf: FileShelfModel
     @ObservedObject var pomodoro: PomodoroManager
-    @ObservedObject var spectrum: SpectrumAnalyzer
+    let spectrum: SpectrumAnalyzer
+    let hasAudio: Bool
+    var activity: NotchActivity?
+    var flankLayout: NotchFlankLayout?
+    @ObservedObject private var store = WidgetStore.shared
     @ObservedObject private var settings = UserSettings.shared
-    /// Whether the pill hero (cover-or-generic-icon + wave) should show at all —
-    /// true for Spotify/Music, but also for any other system audio (browser
-    /// video, calls, …) that has no scriptable track to show a cover for.
-    let hasAudioHero: Bool
-    /// True when `NotchRootView` draws the spectrum above the island so it can
-    /// travel to the page as one object. The pill then reserves the run's space
-    /// but leaves it empty — the width estimate in `collapsedWidth` still has to
-    /// hold, or the capsule clips against its own silhouette.
-    var waveDrawnByOverlay: Bool = false
+    @ObservedObject private var systemStatus = SystemStatus.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// Icon and accent of whichever app is making the sound. Resolved centrally
-    /// (once per bundle-ID change, not per wave-bar redraw) so the pill, the
-    /// spectrum page and the fullscreen takeover all read the same answer.
-    @ObservedObject private var sourceApp = SourceAppAccent.shared
-
-    /// The colours this pill's wave and thumbnail draw with. See `WaveTints`.
-    private var tints: WaveTints {
-        WaveTints.resolve(nowPlaying: nowPlaying, sourceBundleID: spectrum.sourceBundleID, sourceAppTint: sourceApp.tint)
-    }
-
-    /// What VoiceOver says for the pill as a whole.
-    ///
-    /// One label on the container rather than labels on the parts: the pill is a
-    /// cover thumbnail, a wave and sometimes a timer readout, none of which mean
-    /// anything read out individually — "image, image, 24 colon 13" is worse than
-    /// silence. Read as one sentence it is the same thing a sighted glance gets.
-    private var spokenSummary: String {
-        var parts: [String] = []
-        if let track = nowPlaying.track, hasAudioHero {
-            parts.append("\(track.name) — \(track.artist)")
-        } else if hasAudioHero {
-            parts.append(String(localized: "a11y.pill.audio", defaultValue: "Ton läuft"))
-        }
-        if let timer = pomodoro.pillText { parts.append(timer) }
-        if !shelf.items.isEmpty {
-            parts.append(String(localized: "a11y.pill.shelf", defaultValue: "\(shelf.items.count) Dateien in der Ablage"))
-        }
-        return parts.isEmpty
-            ? String(localized: "a11y.pill.idle", defaultValue: "Côte d'OS")
-            : parts.joined(separator: ", ")
-    }
-
-    /// The border the pill is on. Its parts stack *along* that border, so on a
-    /// side dock the capsule stands on end: cover above wave above readout.
-    private var dock: NotchDock { viewModel.placement.dock }
-    private var isVertical: Bool { !dock.isHorizontal }
+    private var showsFocus: Bool { store.layout.systemStatusEnabled && systemStatus.focusActive == true }
+    private var showsTimerInSlot: Bool { store.layout.leading == .timer || store.layout.trailing == .timer }
+    private var showsMusicInSlot: Bool { store.layout.leading == .music || store.layout.trailing == .music }
 
     var body: some View {
-        let tints = self.tints
-        // Spacings/paddings here must stay in lock-step with the length estimate
-        // in `NotchViewModel.collapsedWidth`, or the pill clips against the
-        // silhouette — so both sides read from the same `NotchLayout` constants.
-        // That estimate is axis-free: it measures the run of content along the
-        // border, which is the same list of parts either way round.
-        return AxisStack(axis: isVertical ? .vertical : .horizontal,
-                         spacing: NotchLayout.collapsedItemSpacing) {
-            if hasAudioHero {
-                if settings.pillSpectrumOnly {
-                    // Spectrum-only mode: no thumbnail at all (neither cover
-                    // nor source-app icon — "only the spectrum" holds for both
-                    // kinds of audio), just the wave in the space the
-                    // thumbnail freed up.
-                    //
-                    // Geometry is the spectrum *page* scaled down — one rule,
-                    // one knob: the field keeps the page's aspect, so widening
-                    // the pill also makes it taller and its bars thicker, and
-                    // the run holds however many of those fit. That is why
-                    // this reads like the page instead of like a stripe of
-                    // hairlines. See `NotchLayout.pillSpectrumGeometry`.
-                    let wave = NotchLayout.pillSpectrumGeometry(forWidth: settings.pillSpectrumWidth)
-                    if waveDrawnByOverlay {
-                        // The run itself is drawn above the island so it can
-                        // travel to the page without ever unmounting; the pill
-                        // only reserves its space here.
-                        Color.clear
-                            .frame(width: wave.runWidth, height: wave.frameHeight)
-                    } else {
-                        LiveWaveBarsView(
-                            levels: spectrum.bands,
-                            isLive: spectrum.isLive,
-                            isActive: nowPlaying.screensAwake,
-                            tint: tints.primary,
-                            coverBars: tints.coverBars,
-                            count: wave.barCount,
-                            maxHeight: wave.waveHeight,
-                            barWidth: wave.barWidth,
-                            spacing: wave.spacing,
-                            axis: isVertical ? .vertical : .horizontal
-                        )
-                        .frame(width: waveFieldSize(wave).width, height: waveFieldSize(wave).height)
-                        .transition(.opacity.combined(with: .scale(scale: 0.85)))
-                    }
-                } else if tints.fromCover, let url = nowPlaying.track?.artworkURL {
-                    // Fade the new cover in (transaction animation) over a placeholder
-                    // tinted to the track's accent colour rather than flat grey, so a
-                    // track change doesn't flash a grey square then pop during the
-                    // hero crossfade.
-                    AsyncImage(url: url, transaction: Transaction(animation: .easeInOut(duration: 0.2))) { phase in
-                        if let image = phase.image {
-                            image.resizable().scaledToFill()
-                        } else {
-                            nowPlaying.artworkColor ?? Color.white.opacity(0.1)
-                        }
-                    }
-                    .frame(width: NotchLayout.collapsedArtworkWidth, height: NotchLayout.collapsedArtworkWidth)
-                    .clipShape(RoundedRectangle(cornerRadius: NotchLayout.collapsedArtworkCornerRadius))
-                    .transition(.opacity.combined(with: .scale(scale: 0.6)))
+        Button { viewModel.onOpenRequested?() } label: {
+            Group {
+                if let flankLayout {
+                    notchFlankingBody(flankLayout)
                 } else {
-                    // System audio with no scriptable track (browser video, a
-                    // call, …) — show the source app's own icon full-bleed when
-                    // we can identify it (no background/padding: app icons like
-                    // Safari's already bake in their own rounding and margin, so
-                    // wrapping them in another rounded-rect frame just shrank
-                    // them further and read as an extra border), else fall back
-                    // to a plain glyph on a tinted background.
-                    Group {
-                        if let icon = sourceApp.icon {
-                            Image(nsImage: icon).resizable().scaledToFit()
-                        } else {
-                            RoundedRectangle(cornerRadius: NotchLayout.collapsedArtworkCornerRadius)
-                                .fill(Color.white.opacity(0.1))
-                                .overlay {
-                                    Image(systemName: "waveform").font(.system(size: 11))
-                                }
-                        }
-                    }
-                    .frame(width: NotchLayout.collapsedArtworkWidth, height: NotchLayout.collapsedArtworkWidth)
-                    .transition(.opacity.combined(with: .scale(scale: 0.6)))
+                    floatingPillBody
                 }
-                if !settings.pillSpectrumOnly {
-                    LiveWaveBarsView(
-                        levels: spectrum.bands,
-                        isLive: spectrum.isLive,
-                        isActive: nowPlaying.screensAwake,
-                        tint: tints.primary,
-                        coverBars: tints.coverBars,
-                        count: NotchLayout.collapsedWaveBarCount,
-                        maxHeight: NotchLayout.collapsedWaveMaxHeight,
-                        barWidth: NotchLayout.collapsedWaveBarWidth,
-                        spacing: NotchLayout.collapsedWaveSpacing,
-                        axis: isVertical ? .vertical : .horizontal
-                    )
-                    .frame(width: dock.size(length: NotchLayout.collapsedWavesWidth,
-                                            thickness: NotchLayout.collapsedArtworkWidth).width,
-                           height: dock.size(length: NotchLayout.collapsedWavesWidth,
-                                             thickness: NotchLayout.collapsedArtworkWidth).height)
+            }
+            .offset(y: viewModel.isHovering && !reduceMotion ? -0.5 : 0)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .brightness(viewModel.isHovering ? 0.07 : 0)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: viewModel.isHovering)
+        .accessibilityLabel("双击展开刘海工作台")
+        .accessibilityValue(accessibilitySummary)
+        .help(nowPlaying.track == nil ? "双击展开工作台 · 右键调整组件" : "双击展开 · 两指左滑下一首、右滑上一首")
+        .contextMenu {
+            if nowPlaying.track != nil {
+                Button(nowPlaying.isPlaying ? "暂停音乐" : "播放音乐", action: nowPlaying.playPause)
+                Button("上一首", action: nowPlaying.previousTrack)
+                Button("下一首", action: nowPlaying.nextTrack)
+                Divider()
+            }
+            Button("展开工作台") { viewModel.onOpenRequested?() }
+            Button("快速搜索…") { viewModel.onOpenQuickActions?() }
+            Button("固定展开工作台") { viewModel.onOpenRequested?(); viewModel.isPinned = true }
+            Button("编辑组件") { viewModel.onOpenRequested?(); viewModel.isEditingWidgets = true }
+            Button("缩略显示设置…") { WidgetPreferencesWindow.shared.show() }
+        }
+    }
+
+    // MARK: - Notch-Flanking Layout (In Menu Bar Beside Hardware Camera)
+
+    private func notchFlankingBody(_ flank: NotchFlankLayout) -> some View {
+        HStack(spacing: 0) {
+            if flank.leftWingWidth > 0 {
+                flankLeadingContent(compact: flank.leftCompact)
+                    .padding(.leading, flank.leadingTopFlare + 6)
+                    .padding(.trailing, 6)
+                    .frame(width: flank.leftWingWidth, height: flank.height, alignment: .center)
+                    .clipped()
+            }
+
+            Color.clear
+                .frame(width: flank.cameraGapWidth, height: flank.height)
+
+            if flank.rightWingWidth > 0 {
+                flankTrailingContent(compact: flank.rightCompact)
+                    .padding(.leading, 6)
+                    .padding(.trailing, flank.trailingTopFlare + 6)
+                    .frame(width: flank.rightWingWidth, height: flank.height, alignment: .center)
+                    .clipped()
+            }
+        }
+        .frame(width: flank.frame.width, height: flank.height)
+    }
+
+    @ViewBuilder
+    private func flankLeadingContent(compact: Bool) -> some View {
+        HStack(spacing: 5) {
+            if let swipe = viewModel.musicSwipe {
+                Image(systemName: swipe.symbol)
+                    .font(.system(size: 14, weight: .semibold))
+                    .transition(.opacity.combined(with: .scale(scale: 0.88)))
+            } else if let activity {
+                Image(systemName: activity.icon)
+                    .font(.system(size: activity.kind == .audioRoute ? 15 : 14, weight: .semibold))
+                    .foregroundStyle(activity.tint)
+                    .transition(.opacity.combined(with: .scale(scale: 0.88)))
+            } else {
+                mini(store.layout.leading, compact: compact)
+                if showsFocus && (!compact || store.layout.leading == .none) {
+                    Image(systemName: "moon.fill")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(.purple)
+                        .help("系统专注模式已开启")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func flankTrailingContent(compact: Bool) -> some View {
+        HStack(spacing: 5) {
+            if let swipe = viewModel.musicSwipe {
+                Text(swipe.title)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .lineLimit(1)
                     .transition(.opacity)
+            } else if let activity {
+                flankActivityTrailing(activity, compact: compact)
+                    .transition(.opacity)
+            } else {
+                if hasAudio && store.layout.showWave && (!compact || store.layout.trailing == .none) {
+                    WidgetWave(
+                        spectrum: spectrum,
+                        active: nowPlaying.screensAwake,
+                        color: nowPlaying.artworkColor ?? .white,
+                        compact: true
+                    )
+                    .frame(width: 16, height: 15)
                 }
-            } else if pomodoro.pillText == nil {
-                // Idle glyph reflects the tab you'd return to, so it isn't
-                // always the music icon when you last used another tab. Sized by
-                // `TabIcon` itself — the same view the tab bar draws, so the two
-                // cannot drift apart and the hard-cut handover keeps its premise.
-                // (An outer `.font` here would be silently ignored; the one
-                // inside `TabIcon` wins, being closer to the leaf.)
-                TabIcon(tab: viewModel.selectedTab)
-            }
-
-            // The focus-timer readout joins to the right of the artwork + wave
-            // while music plays and stands alone otherwise (it replaces the
-            // idle glyph above rather than crowding it).
-            if let readout = pomodoro.pillText {
-                timerSegment(readout)
-                    .modifier(AlongBorder(vertical: isVertical,
-                                          length: NotchViewModel.timerSegmentWidth(readout),
-                                          thickness: viewModel.collapsedHeight))
-            }
-
-            if !shelf.items.isEmpty {
-                Label("\(shelf.items.count)", systemImage: "tray.full.fill")
-                    .labelStyle(.titleAndIcon)
-                    .font(.system(size: NotchLayout.collapsedBadgeFontSize, weight: .semibold))
-                    .modifier(AlongBorder(vertical: isVertical, length: NotchLayout.collapsedBadgeWidth,
-                                          thickness: viewModel.collapsedHeight))
+                if store.layout.trailing != .none {
+                    mini(store.layout.trailing, compact: compact)
+                } else if !showsTimerInSlot && pomodoro.pillText != nil {
+                    timerSummary(compact: compact)
+                }
             }
         }
-        .padding(isVertical ? .vertical : .horizontal, NotchLayout.collapsedContentPadding)
-        // Pin the pill's run to a fixed band against its border. Without this
-        // the row is centred in the *animated* island frame during the morph,
-        // so the glyph starts mid-island and drifts into place — the diagonal
-        // flight the hard-cut handover exists to avoid.
-        .frame(width: isVertical ? viewModel.collapsedHeight : nil,
-               height: isVertical ? nil : viewModel.collapsedHeight)
-        .frame(maxWidth: isVertical ? .infinity : nil,
-               maxHeight: isVertical ? nil : .infinity,
-               alignment: bandAlignment)
-        // The spectrum-only toggle and its sliders swap the hero's layout in
-        // place; a scoped value animation can't interfere with the staged
-        // expand/collapse walk's explicit withAnimation calls.
-        .animation(NotchLayout.islandMorphAnimation, value: settings.pillSpectrumOnly)
-        .animation(NotchLayout.islandMorphAnimation, value: settings.pillSpectrumWidth)
-        // One element, one sentence — see `spokenSummary`.
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(spokenSummary)
     }
 
-    /// Which end of the island the pill's run is pinned to — always the docked
-    /// border, so the collapsed glyph and the tab strip's glyph land on the
-    /// same spot.
-    private var bandAlignment: Alignment {
-        switch dock {
-        case .top: return .top
-        case .bottom: return .bottom
-        case .leading: return .leading
-        case .trailing: return .trailing
+    @ViewBuilder
+    private func flankActivityTrailing(_ activity: NotchActivity, compact: Bool) -> some View {
+        if let progress = activity.progress {
+            let fraction = CGFloat(min(max(progress, 0), 1))
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(activity.title)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(activity.tint)
+                    .lineLimit(1)
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.20))
+                    Capsule()
+                        .fill(Color.white.opacity(0.92))
+                        .frame(width: (compact ? 42 : 56) * fraction)
+                }
+                .frame(width: compact ? 42 : 56, height: 3.5)
+            }
+        } else if let detail = activity.detail, !compact {
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(activity.title)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(activity.tint)
+                    .lineLimit(1)
+                Text(detail)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.70))
+                    .monospacedDigit()
+                    .lineLimit(1)
+            }
+        } else {
+            Text(activity.title)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(activity.tint)
+                .lineLimit(1)
         }
     }
 
-    /// The field a pill wave gets: its run along the border, its deflection
-    /// across it.
-    private func waveFieldSize(_ wave: NotchLayout.PillSpectrumGeometry) -> CGSize {
-        dock.size(length: wave.runWidth, thickness: wave.frameHeight)
+    // MARK: - Floating Pill Layout (External Display / Crowded Fallback)
+
+    @ViewBuilder
+    private var floatingPillBody: some View {
+        Group {
+            if let swipe = viewModel.musicSwipe {
+                Label(swipe.title, systemImage: swipe.symbol)
+                    .font(.subheadline.weight(.semibold))
+            } else if let activity {
+                ActivityCompactView(activity: activity)
+            } else if viewModel.hasCompactContent(hasAudio: hasAudio, timerText: pomodoro.pillText) {
+                floatingCompactRow
+            } else {
+                Image(nsImage: AppBrand.statusIcon())
+            }
+        }
     }
 
-    /// The passive focus-timer readout. Sizes must stay in lock-step with the
-    /// width estimate in `NotchViewModel.timerSegmentWidth`.
-    private func timerSegment(_ readout: String) -> some View {
-        let paused = pomodoro.phase == .paused
-        return HStack(spacing: NotchLayout.collapsedTimerInnerSpacing) {
-            Image(systemName: paused ? "pause.fill" : "timer")
-                .font(.system(size: NotchLayout.collapsedTimerIconSize, weight: .semibold))
-                .foregroundStyle(paused ? Color.white.opacity(0.55) : Color.orange)
-                .frame(width: NotchLayout.collapsedTimerIconWidth)
-            Text(readout)
-                .font(.system(size: NotchLayout.collapsedTimerFontSize, weight: .semibold))
+    private var floatingCompactRow: some View {
+        HStack(spacing: 8) {
+            mini(store.layout.leading, compact: false)
+            if showsFocus {
+                Image(systemName: "moon.fill")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.purple)
+                    .help("系统专注模式已开启")
+            }
+            if hasAudio && !showsMusicInSlot {
+                if nowPlaying.isPlaying && nowPlaying.track != nil {
+                    musicSummary(compact: false)
+                } else {
+                    Label("系统音频", systemImage: "speaker.wave.2")
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            if hasAudio && store.layout.showWave {
+                WidgetWave(spectrum: spectrum, active: nowPlaying.screensAwake,
+                           color: nowPlaying.artworkColor ?? .white, compact: true)
+                    .frame(width: 18, height: 16)
+            }
+            if !showsTimerInSlot && pomodoro.pillText != nil { timerSummary(compact: false) }
+            mini(store.layout.trailing, compact: false)
+        }
+        .padding(.horizontal, NotchLayout.compactContentInset)
+    }
+
+    // MARK: - Shared Mini Widgets
+
+    private func timerSummary(compact: Bool) -> some View {
+        HStack(spacing: 3) {
+            if pomodoro.phase == .paused {
+                Image(systemName: "pause.fill")
+                    .font(.system(size: 7.5, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.75))
+            } else if pomodoro.phase == .running {
+                Circle()
+                    .fill(.orange)
+                    .frame(width: compact ? 3.5 : 4.5, height: compact ? 3.5 : 4.5)
+                    .shadow(color: .orange.opacity(reduceMotion ? 0 : 0.65), radius: 3)
+                    .accessibilityHidden(true)
+            }
+            Text(pomodoro.remainingText ?? settings.timerPresets.first?.formattedDuration ?? "25:00")
+                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
                 .monospacedDigit()
-                .opacity(paused ? 0.55 : 1)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+                .foregroundStyle(pomodoro.phase == .paused ? .white.opacity(0.72) : .white)
         }
+    }
+
+    private func musicSummary(compact: Bool) -> some View {
+        HStack(spacing: 5) {
+            MusicArtwork(
+                url: nowPlaying.track?.artworkURL,
+                playing: nowPlaying.isPlaying && nowPlaying.screensAwake,
+                size: 22,
+                appearance: store.layout.musicAppearance
+            )
+            if !compact {
+                Text(nowPlaying.track?.name ?? "等待播放")
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func mini(_ kind: CompactWidget, compact: Bool) -> some View {
+        switch kind {
+        case .system:
+            CompactSystemRings()
+                .scaleEffect(viewModel.isHovering && !reduceMotion ? 1.04 : 1)
+        case .timer:
+            timerSummary(compact: compact)
+        case .music:
+            musicSummary(compact: compact)
+        case .battery:
+            CompactBattery()
+        case .none:
+            EmptyView()
+        }
+    }
+
+    private var accessibilitySummary: String {
+        if let swipe = viewModel.musicSwipe { return swipe.title }
+        if let activity {
+            let detail = activity.progress.map { percentage($0) } ?? activity.detail
+            return [activity.title, detail].compactMap { $0 }.joined(separator: "，")
+        }
+
+        let showsSystem = store.layout.leading == .system || store.layout.trailing == .system
+        let showsBattery = store.layout.leading == .battery || store.layout.trailing == .battery
+        let track = hasAudio || showsMusicInSlot ? nowPlaying.track?.name : nil
+        let timer = showsTimerInSlot || pomodoro.pillText != nil ? pomodoro.remainingText : nil
+        return [track, timer, showsFocus ? "系统专注模式" : nil,
+                showsSystem ? "CPU 与内存" : nil, showsBattery ? "电池" : nil]
+            .compactMap { $0 }.joined(separator: "，")
     }
 }

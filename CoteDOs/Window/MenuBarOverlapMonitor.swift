@@ -1,121 +1,193 @@
 import AppKit
 import ApplicationServices
 
-/// Detects when the frontmost app's menu bar (File/Edit/View/...) reaches far
-/// enough to the right that it visually collides with the notch pill at
-/// top-center — e.g. Audacity's wide menu ("Bearbeiten", "Wiedergabe", ...).
-/// The pill can't dodge sideways (it's pinned to the physical/virtual notch),
-/// so on overlap we just hide it until the frontmost app changes or its menu
-/// bar shrinks back below the threshold.
+/// Tracks available horizontal clearance on both sides of the physical camera
+/// notch so compact wings never cover macOS status bar icons or app menus.
 ///
-/// Reads the frontmost app's menu-bar item frames via the Accessibility API.
-/// This reuses the same Accessibility permission already requested for the
-/// volume-key tap (`MediaKeyTap`) — no separate prompt. If the permission
-/// isn't granted, or reading fails for any reason, this fails open and reports no
-/// overlap — the pill stays where it is rather than hiding on a guess.
+/// - **Right side (status icons)**: read via `CGWindowListCopyWindowInfo`
+///   (layer 25 status-item windows). Works with **no Accessibility or Screen
+///   Recording permission** on macOS 14–26.
+/// - **Left side (frontmost app menus)**: read via the Accessibility API when
+///   `AXIsProcessTrusted()` is granted. Without Accessibility permission,
+///   `availableLeft` stays `nil` and `NotchFlankLayout` applies a conservative
+///   fallback cap.
 final class MenuBarOverlapMonitor {
-    /// Called on the main thread whenever the overlap state changes.
-    var onChange: ((Bool) -> Void)?
+    var onChange: ((MenuBarClearance) -> Void)?
+    var targetGeometryProvider: (() -> MenuBarSafeArea?)?
+    var excludedWindowNumbersProvider: (() -> Set<Int>)?
 
-    /// The left edge (screen coordinates, same space as `NSScreen.frame`) of
-    /// the currently visible notch pill. Supplied by the window controller,
-    /// which owns the actual geometry.
-    var notchLeftEdgeProvider: (() -> CGFloat?)?
-
-    private var activationObserver: NSObjectProtocol?
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var screenObserver: NSObjectProtocol?
     private var pollTimer: Timer?
-    private(set) var isOverlapping = false
+    private(set) var clearance: MenuBarClearance = .unconstrained
 
-    /// How close the frontmost app's rightmost menu item may get to the
-    /// pill's left edge before it counts as an overlap.
-    private static let safetyMargin: CGFloat = 8
-    /// Fallback rate only — an app switch already triggers `evaluate()` via
-    /// notification. Each tick reads the frontmost app's menu bar over the AX
-    /// API (cross-process IPC), and a menu bar that changes width *without* an
-    /// app switch is rare enough that half the old rate is fine.
-    private static let pollInterval: TimeInterval = 2.0
+    private static let pollInterval: TimeInterval = 1.5
+
+    static var hasAccessibilityPermission: Bool {
+        AXIsProcessTrusted()
+    }
+
+    static func requestAccessibilityPermission() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+    }
 
     func start() {
-        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification,
+        guard pollTimer == nil else {
+            refreshNow()
+            return
+        }
+        let ws = NSWorkspace.shared.notificationCenter
+        let names: [Notification.Name] = [
+            NSWorkspace.didActivateApplicationNotification,
+            NSWorkspace.didLaunchApplicationNotification,
+            NSWorkspace.didTerminateApplicationNotification,
+            NSWorkspace.activeSpaceDidChangeNotification,
+        ]
+        workspaceObservers = names.map { name in
+            ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.evaluate()
+            }
+        }
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in self?.evaluate() }
-
-        // A menu bar can also change width without an app switch (e.g. a
-        // document window gaining menu items). There's no reliable system-wide
-        // "menu bar changed" notification, so a light poll is the pragmatic
-        // fallback — cheap since it only runs while there's a frontmost app.
-        pollTimer = Timer.scheduledTimer(withTimeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
+        ) { [weak self] _ in
             self?.evaluate()
         }
+        let timer = Timer.scheduledTimer(withTimeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
+            self?.evaluate()
+        }
+        timer.tolerance = 0.5
+        pollTimer = timer
         evaluate()
     }
 
     func stop() {
-        if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
-        activationObserver = nil
+        let ws = NSWorkspace.shared.notificationCenter
+        workspaceObservers.forEach(ws.removeObserver)
+        workspaceObservers.removeAll()
+        if let screenObserver {
+            NotificationCenter.default.removeObserver(screenObserver)
+            self.screenObserver = nil
+        }
         pollTimer?.invalidate()
         pollTimer = nil
     }
 
     deinit { stop() }
 
-    private func evaluate() {
-        let overlapping = computeOverlap()
-        guard overlapping != isOverlapping else { return }
-        isOverlapping = overlapping
-        onChange?(overlapping)
+    func refreshNow() {
+        evaluate(force: true)
     }
 
-    private func computeOverlap() -> Bool {
-        guard MediaKeyTap.hasAccessibilityPermission(prompt: false) else { return false }
-        guard let app = NSWorkspace.shared.frontmostApplication,
-              app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
-              let notchLeftEdge = notchLeftEdgeProvider?(),
-              let rightEdge = rightmostMenuItemEdge(pid: app.processIdentifier)
-        else { return false }
-        return rightEdge + Self.safetyMargin > notchLeftEdge
+    private func evaluate(force: Bool = false) {
+        let next = measureClearance()
+        guard force || next.differsSignificantly(from: clearance) else { return }
+        clearance = next
+        onChange?(next)
     }
 
-    /// The right edge (screen coordinates) of the frontmost app's last
-    /// top-level menu item — the one that determines how far the menu bar
-    /// reaches to the right (typically "Hilfe"/"Fenster" or "Help"/"Window").
-    /// AX screen coordinates share the same X axis as `NSScreen.frame` (only Y
-    /// is flipped), so the X values are directly comparable.
-    private func rightmostMenuItemEdge(pid: pid_t) -> CGFloat? {
-        let axApp = AXUIElementCreateApplication(pid)
+    private func measureClearance() -> MenuBarClearance {
+        guard let safeArea = targetGeometryProvider?(), safeArea.notch != nil else {
+            return .unconstrained
+        }
+        let primaryHeight = NSScreen.screens.first(where: { $0.frame.origin == .zero })?.frame.height
+            ?? NSScreen.screens.first?.frame.height
+            ?? safeArea.screenFrame.height
+        let excluded = excludedWindowNumbersProvider?() ?? []
+        let windows = Self.sampleOnScreenWindows()
+        let leftEdge = Self.frontmostMenuRightEdgeCG(safeArea: safeArea, primaryScreenHeight: primaryHeight)
+
+        return MenuBarClearance.resolve(
+            safeArea: safeArea,
+            primaryScreenHeight: primaryHeight,
+            windows: windows,
+            excludedWindowNumbers: excluded,
+            leftMenuRightEdgeCG: leftEdge
+        )
+    }
+
+    private static func sampleOnScreenWindows() -> [MenuBarWindowSample] {
+        guard let raw = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else { return [] }
+
+        var samples: [MenuBarWindowSample] = []
+        samples.reserveCapacity(24)
+        for info in raw {
+            guard let layer = info[kCGWindowLayer as String] as? Int,
+                  layer == MenuBarClearance.statusItemLayer,
+                  let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary),
+                  let number = info[kCGWindowNumber as String] as? Int else { continue }
+            let alpha = (info[kCGWindowAlpha as String] as? CGFloat)
+                ?? CGFloat((info[kCGWindowAlpha as String] as? Double) ?? 1)
+            samples.append(MenuBarWindowSample(
+                windowNumber: number,
+                layer: layer,
+                alpha: alpha,
+                cgBounds: bounds
+            ))
+        }
+        return samples
+    }
+
+    /// Reads the rightmost top-level menu item edge of the frontmost app on
+    /// `safeArea`'s display via Accessibility (returns `nil` without AX).
+    private static func frontmostMenuRightEdgeCG(safeArea: MenuBarSafeArea,
+                                                 primaryScreenHeight: CGFloat) -> CGFloat? {
+        guard AXIsProcessTrusted(),
+              let notch = safeArea.notch,
+              let app = NSWorkspace.shared.frontmostApplication,
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+            return nil
+        }
+
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
         var menuBarValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(axApp, kAXMenuBarAttribute as CFString, &menuBarValue) == .success,
-              let menuBarElement = menuBarValue
-        else { return nil }
-
-        // The AX API returns CFTypeRef; check the type IDs instead of
-        // force-casting so an unexpected shape reads as "no menu bar found"
-        // (fails open — the notch stays visible) rather than a crash.
-        guard CFGetTypeID(menuBarElement) == AXUIElementGetTypeID() else { return nil }
+              let menuBarElement = menuBarValue,
+              CFGetTypeID(menuBarElement) == AXUIElementGetTypeID() else { return nil }
         let menuBar = unsafeDowncast(menuBarElement, to: AXUIElement.self)
 
         var childrenValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(menuBar, kAXChildrenAttribute as CFString, &childrenValue) == .success,
               let children = childrenValue as? [AXUIElement],
-              let lastItem = children.last
-        else { return nil }
+              !children.isEmpty else { return nil }
 
-        var positionValue: CFTypeRef?
-        var sizeValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(lastItem, kAXPositionAttribute as CFString, &positionValue) == .success,
-              AXUIElementCopyAttributeValue(lastItem, kAXSizeAttribute as CFString, &sizeValue) == .success,
-              let positionValue, CFGetTypeID(positionValue) == AXValueGetTypeID(),
-              let sizeValue, CFGetTypeID(sizeValue) == AXValueGetTypeID()
-        else { return nil }
+        let cgTop = primaryScreenHeight - safeArea.screenFrame.maxY
+        let cgBottom = cgTop + safeArea.menuBarHeight
+        var maxRightEdge: CGFloat?
 
-        var position = CGPoint.zero
-        var size = CGSize.zero
-        guard AXValueGetValue(unsafeDowncast(positionValue, to: AXValue.self), .cgPoint, &position),
-              AXValueGetValue(unsafeDowncast(sizeValue, to: AXValue.self), .cgSize, &size)
-        else { return nil }
+        for child in children {
+            var posVal: CFTypeRef?
+            var sizeVal: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(child, kAXPositionAttribute as CFString, &posVal) == .success,
+                  AXUIElementCopyAttributeValue(child, kAXSizeAttribute as CFString, &sizeVal) == .success,
+                  let posVal, CFGetTypeID(posVal) == AXValueGetTypeID(),
+                  let sizeVal, CFGetTypeID(sizeVal) == AXValueGetTypeID() else { continue }
+            var pos = CGPoint.zero
+            var size = CGSize.zero
+            guard AXValueGetValue(unsafeDowncast(posVal, to: AXValue.self), .cgPoint, &pos),
+                  AXValueGetValue(unsafeDowncast(sizeVal, to: AXValue.self), .cgSize, &size),
+                  size.width > 1, size.height > 1 else { continue }
 
-        return position.x + size.width
+            // Only consider menu items sitting on the target display's menu bar
+            // and belonging to the left app-menu region (left of notch right edge).
+            guard pos.y < cgBottom, pos.y + size.height > cgTop,
+                  pos.x >= safeArea.screenFrame.minX,
+                  pos.x < notch.maxX else { continue }
+
+            let right = pos.x + size.width
+            if let existing = maxRightEdge {
+                maxRightEdge = max(existing, right)
+            } else {
+                maxRightEdge = right
+            }
+        }
+        return maxRightEdge
     }
 }

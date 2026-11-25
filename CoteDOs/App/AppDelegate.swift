@@ -46,22 +46,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // so it only needs pointing at the analyzer once.
         SourceAppAccent.shared.follow(spectrum)
 
+        SystemStatus.shared.start(activities: activities)
         let controller = NotchWindowController(viewModel: viewModel, nowPlaying: nowPlaying, shelf: shelf, activities: activities, pomodoro: pomodoro, capture: capture, spectrum: spectrum)
         controller.show()
         windowController = controller
 
         statusBarController = StatusBarController(
-            onToggleNotch: { [weak self] in self?.toggleNotchPaused() ?? false },
+            onToggleNotch: { [weak self] in self?.toggleNotchPaused() },
             isNotchPlaced: { [weak self] in self?.windowController?.isPlacedByUser ?? false },
-            onResetPlacement: { [weak self] in self?.windowController?.resetPlacement() }
+            onResetPlacement: { [weak self] in self?.windowController?.resetPlacement() },
+            onOpenTimer: { [weak self] in self?.windowController?.presentTimer() },
+            onOpenDashboard: { [weak self] in self?.windowController?.presentDashboard() },
+            onOpenQuickActions: { [weak self] in self?.windowController?.presentQuickActions() }
         )
+        controller.onOpenSettings = { [weak self] in self?.statusBarController?.openSettings() }
+        controller.onPauseChanged = { [weak self] in self?.statusBarController?.setNotchPaused($0) }
 
         // ⌥⌘N pauses/resumes the whole notch from anywhere. Born from needing
         // to hover/click the exact spot the notch occupies — until now the only
         // way there was quitting the app.
         HotKeyCenter.shared.register(.notchToggle) { [weak self] in
-            guard let self else { return }
-            self.statusBarController?.setNotchPaused(self.toggleNotchPaused())
+            self?.toggleNotchPaused()
+        }
+        HotKeyCenter.shared.register(.quickActions) { [weak self] in
+            self?.windowController?.presentQuickActions()
         }
 
         enableLaunchAtLogin()
@@ -124,6 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         nowPlaying.stop()
         activities.stop()
+        SystemStatus.shared.stop()
         systemHUD.stop()
         spectrum.stop()
         capture.stop()
@@ -156,6 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func systemWillSleep() {
+        SystemStatus.shared.setScreensAwake(false)
         nowPlaying.stop()
         activities.stop()
         systemHUD.stop()
@@ -166,6 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func systemDidWake() {
+        SystemStatus.shared.setScreensAwake(true)
         nowPlaying.start()
         activities.start()
         systemHUD.start(presenting: activities)
@@ -175,18 +186,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func screensDidSleep() {
+        SystemStatus.shared.setScreensAwake(false)
         nowPlaying.setScreensAwake(false)
         pomodoro.setScreensAwake(false)
         // The display went dark, so no takeover of ours is up holding it awake:
         // there is nothing to guard until the screen comes back.
         spectrumGuard?.stop()
-        // The AX polls (Safari fullscreen, menu-bar overlap) answer questions
-        // about a display nobody can see — stop them with the screen, not
-        // just with system sleep.
         windowController?.suspendMonitors()
     }
 
     @objc private func screensDidWake() {
+        SystemStatus.shared.setScreensAwake(true)
         nowPlaying.setScreensAwake(true)
         pomodoro.setScreensAwake(true)
         windowController?.resumeMonitors()
@@ -197,12 +207,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController?.reposition()
     }
 
-    /// Flip the notch pause and report the new state — the one toggle both
-    /// the global hotkey and the status menu go through.
-    private func toggleNotchPaused() -> Bool {
-        let disabled = !(windowController?.isUserDisabled ?? false)
-        windowController?.setUserDisabled(disabled)
-        return disabled
+    /// The status menu and the global hotkey share the same pause state.
+    private func toggleNotchPaused() {
+        guard let windowController else { return }
+        windowController.setUserDisabled(!windowController.isUserDisabled)
     }
 
     @objc private func resetNotchPlacement() {

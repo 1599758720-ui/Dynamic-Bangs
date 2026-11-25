@@ -13,6 +13,8 @@ struct NotchActivity: Identifiable, Equatable {
         case timer
         /// A named focus timer (pomodoro) ran out.
         case pomodoroEnd
+        case focus
+        case unlocked
     }
 
     let id = UUID()

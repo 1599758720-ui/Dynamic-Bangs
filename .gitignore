@@ -17,4 +17,7 @@ xcuserdata/
 # local-only project notes
 CLAUDE.md
 docs/
+work/
+*.dmg
 CoteDOs-*.zip
+Dynamic-Bangs-*.zip

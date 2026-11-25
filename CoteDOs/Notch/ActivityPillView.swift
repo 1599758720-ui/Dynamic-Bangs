@@ -20,6 +20,12 @@ struct ActivityCompactView: View {
                 .frame(width: isRoute ? 22 : 16)
             if let progress = activity.progress {
                 let fraction = CGFloat(min(max(progress, 0), 1))
+                if !isVertical {
+                    Text(activity.title)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
                 GeometryReader { geo in
                     // Fills from the border end on a vertical pill, the same way
                     // it fills from the leading edge on a horizontal one.
@@ -31,7 +37,7 @@ struct ActivityCompactView: View {
                                    height: isVertical ? geo.size.height * fraction : nil)
                     }
                 }
-                .frame(width: isVertical ? 4 : nil, height: isVertical ? nil : 4)
+                .frame(width: isVertical ? 4 : 76, height: isVertical ? nil : 4)
             } else if !isVertical {
                 Text(activity.title)
                     .font(.system(size: isRoute ? 12 : 11, weight: isRoute ? .semibold : .medium))

@@ -9,8 +9,8 @@
     },
     "a11y.pill.idle" : {
       "localizations" : {
-        "de" : { "stringUnit" : { "state" : "translated", "value" : "Côte d'OS" } },
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Côte d'OS" } }
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Dynamic Bangs" } },
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Dynamic Bangs" } }
       }
     },
     "a11y.pill.shelf" : {
@@ -177,8 +177,8 @@
     },
     "menu.quit" : {
       "localizations" : {
-        "de" : { "stringUnit" : { "state" : "translated", "value" : "Côte d'OS beenden" } },
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Quit Côte d'OS" } }
+        "de" : { "stringUnit" : { "state" : "translated", "value" : "Dynamic Bangs beenden" } },
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Quit Dynamic Bangs" } }
       }
     },
     "menu.resetPlacement" : {

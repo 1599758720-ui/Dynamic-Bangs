@@ -15,7 +15,7 @@ import SwiftUI
 struct CaptureView: View {
     @ObservedObject var capture: ObsidianCapture
     @ObservedObject var viewModel: NotchViewModel
-    @State private var text = ""
+    @AppStorage("localCaptureDraft") private var text = ""
     @State private var fieldLive = false
     @State private var vaultDisplayName = ""
     @FocusState private var fieldFocused: Bool

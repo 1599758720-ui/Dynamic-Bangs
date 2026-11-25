@@ -45,7 +45,7 @@ struct GeneralSettings: View {
             } header: {
                 Text(String(localized: "settings.data", defaultValue: "Daten"))
             } footer: {
-                LabeledContent("Côte d'OS", value: versionString)
+                LabeledContent(AppBrand.name, value: versionString)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -2,6 +2,8 @@ import AppKit
 
 /// Borderless, transparent, always-on-top panel that hosts the notch island.
 final class NotchPanel: NSPanel {
+    var allowsKeyboardFocus = false
+
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
@@ -11,7 +13,8 @@ final class NotchPanel: NSPanel {
         )
 
         isFloatingPanel = true
-        level = .statusBar
+        level = .floating
+        appearance = NSAppearance(named: .darkAqua)
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false
@@ -21,13 +24,10 @@ final class NotchPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
     }
 
-    override var canBecomeKey: Bool { true }
+    override var canBecomeKey: Bool { allowsKeyboardFocus && !SystemStatus.shared.isLocked }
     override var canBecomeMain: Bool { false }
 
-    /// Take the frame as given. AppKit otherwise keeps a window's top edge
-    /// clear of the menu bar, which for this panel means every attempt to carry
-    /// it away from the top edge is silently pinned back — the island moved
-    /// sideways and refused to go down at all.
+    /// The controller fits the whole window inside the display's docking area.
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         frameRect
     }

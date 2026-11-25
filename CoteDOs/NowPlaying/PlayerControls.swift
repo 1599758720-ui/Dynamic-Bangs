@@ -21,7 +21,9 @@ extension View {
 struct ControlButton: View {
     let systemName: String
     var size: CGFloat
+    var diameter: CGFloat = 32
     var color: Color = .white
+    var filled = false
     /// Spoken name. Required rather than optional on purpose: a `Button` whose
     /// label is only an `Image(systemName:)` announces nothing at all to
     /// VoiceOver, so every transport control here was silent, and an argument you
@@ -29,22 +31,13 @@ struct ControlButton: View {
     let label: String
     let action: () -> Void
 
-    @State private var hovering = false
-
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: size))
-                .foregroundStyle(color)
-                .frame(width: 34, height: 32)
-                .background(
-                    Circle().fill(Color.white.opacity(hovering ? 0.16 : 0))
-                )
-                .contentShape(Rectangle())
+                .font(.system(size: size, weight: .semibold))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NotchButtonStyle(tint: color, filled: filled, shape: .circle(diameter)))
         .accessibilityLabel(label)
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .help(label)
     }
 }

@@ -9,6 +9,8 @@ import SwiftUI
 /// second, so a moving progress bar costs no IPC at all.
 final class NowPlayingManager: ObservableObject {
     @Published private(set) var isRunning = false
+    @Published private(set) var needsPlayerActivation = false
+    @Published private(set) var commandError: String?
     @Published private(set) var isPlaying = false
     @Published private(set) var track: NowPlayingTrack?
     @Published private(set) var position: TimeInterval = 0
@@ -35,8 +37,9 @@ final class NowPlayingManager: ObservableObject {
 
     private let spotify = SpotifySource()
     private let music = AppleMusicSource()
-    private var sources: [ScriptableMediaSource] { [spotify, music] }
-    private var active: ScriptableMediaSource
+    private let netease = NeteaseSource()
+    private var sources: [NowPlayingSource] { [netease, spotify, music] }
+    private var active: NowPlayingSource
 
     private let settings: UserSettings
     private var timer: Timer?
@@ -55,6 +58,7 @@ final class NowPlayingManager: ObservableObject {
     init(settings: UserSettings = .shared) {
         self.settings = settings
         self.active = spotify
+        netease.onChange = { [weak self] in self?.publishActive() }
     }
 
     // MARK: Lifecycle
@@ -79,6 +83,7 @@ final class NowPlayingManager: ObservableObject {
 
     func stop() {
         isStarted = false
+        netease.stop()
         stopTimer()
         cancellable = nil
         DistributedNotificationCenter.default().removeObserver(self)
@@ -128,11 +133,12 @@ final class NowPlayingManager: ObservableObject {
 
     /// Which sources to actually query: all in auto mode (to detect the active
     /// app), only the chosen one otherwise.
-    private func sourcesToQuery() -> [ScriptableMediaSource] {
+    private func sourcesToQuery() -> [NowPlayingSource] {
         switch settings.mediaSource {
         case .auto: return sources
         case .spotify: return [spotify]
         case .appleMusic: return [music]
+        case .netease: return [netease]
         }
     }
 
@@ -146,13 +152,16 @@ final class NowPlayingManager: ObservableObject {
         group.notify(queue: .main) { [weak self] in self?.publishActive() }
     }
 
-    private func selectActive() -> ScriptableMediaSource {
+    private func selectActive() -> NowPlayingSource {
         switch settings.mediaSource {
         case .spotify: return spotify
         case .appleMusic: return music
+        case .netease: return netease
         case .auto:
+            if netease.state.isPlaying { return netease }
             if spotify.state.isPlaying { return spotify }
             if music.state.isPlaying { return music }
+            if netease.state.isRunning, netease.state.track != nil { return netease }
             if spotify.state.isRunning, spotify.state.track != nil { return spotify }
             if music.state.isRunning, music.state.track != nil { return music }
             return spotify
@@ -163,6 +172,8 @@ final class NowPlayingManager: ObservableObject {
         active = selectActive()
         let s = active.state
         activeSourceID = active.id
+        needsPlayerActivation = active.id == .netease && netease.needsPlayerActivation
+        commandError = active.id == .netease ? netease.commandError : nil
         isRunning = s.isRunning
         isPlaying = s.isPlaying
         track = s.track

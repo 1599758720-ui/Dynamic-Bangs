@@ -2,24 +2,18 @@ import SwiftUI
 
 struct ShelfView: View {
     @ObservedObject var shelf: FileShelfModel
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         ZStack {
-            // Dashed frame only as live drop feedback; otherwise solid black.
-            if shelf.isDropTargeted {
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5]))
-                    .foregroundStyle(.white.opacity(0.85))
-            }
-
             if shelf.items.isEmpty {
-                VStack(spacing: 6) {
+                VStack(spacing: 10) {
                     Image(systemName: "tray.and.arrow.down")
-                        .font(.system(size: 20))
-                    Text(String(localized: "shelf.dropHint", defaultValue: "Dateien hierher ziehen"))
-                        .font(.system(size: 11))
+                        .font(.system(size: 25, weight: .light))
+                    Text("拖放文件到这里暂存")
+                        .font(.system(size: 12, weight: .medium))
                 }
-                .foregroundStyle(.white.opacity(0.45))
+                .foregroundStyle(NotchStyle.secondary)
             } else {
                 // `minWidth: geo.size.width` is what centres the row. A plain
                 // horizontal `ScrollView` lays its content out from the leading
@@ -39,21 +33,25 @@ struct ShelfView: View {
                 }
             }
         }
-        // An overlay, not a row of its own above the shelf: as a row it took
-        // height off the top and pushed the files below centre, to say something
-        // about a control that is one glyph.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.white.opacity(shelf.isDropTargeted ? 0.10 : 0.055),
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(shelf.isDropTargeted ? Color.accentColor
+                              : .white.opacity(contrast == .increased ? 0.26 : 0.10),
+                              style: StrokeStyle(lineWidth: shelf.isDropTargeted ? 1.5 : 0.75,
+                                                 dash: shelf.isDropTargeted ? [5, 4] : []))
+                .allowsHitTesting(false)
+        }
         .overlay(alignment: .topTrailing) {
             if !shelf.items.isEmpty {
-                Button(action: shelf.clear) {
-                    Image(systemName: "trash")
-                        .font(.system(size: 11))
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white.opacity(0.45))
-                .help(String(localized: "shelf.clear", defaultValue: "Ablage leeren"))
-                .accessibilityLabel(String(localized: "shelf.clear", defaultValue: "Ablage leeren"))
+                Button("清空暂存", systemImage: "trash", action: shelf.clear)
+                    .labelStyle(.iconOnly)
+                    .font(.system(size: 11))
+                    .buttonStyle(NotchButtonStyle(shape: .circle(28)))
+                    .help("清空暂存")
+                    .padding(8)
             }
         }
     }
@@ -62,9 +60,11 @@ struct ShelfView: View {
 private struct ShelfItemView: View {
     @ObservedObject var item: ShelfItem
     @ObservedObject var shelf: FileShelfModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hovering = false
 
     var body: some View {
-        VStack(spacing: 2) {
+        VStack(spacing: 8) {
             Group {
                 if let thumbnail = item.thumbnail {
                     Image(nsImage: thumbnail)
@@ -76,7 +76,7 @@ private struct ShelfItemView: View {
                         .foregroundStyle(.white.opacity(0.6))
                 }
             }
-            .frame(width: 44, height: 44)
+            .frame(width: 46, height: 46)
             .overlay(alignment: .topTrailing) {
                 if item.isMissing {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -86,15 +86,26 @@ private struct ShelfItemView: View {
             }
 
             Text(item.name)
-                .font(.system(size: 8))
+                .font(.system(size: 10, weight: .medium))
                 .lineLimit(1)
-                .frame(width: 50)
+                .truncationMode(.middle)
+                .frame(width: 64)
                 .foregroundStyle(.white.opacity(0.7))
         }
-        .padding(4)
-        .opacity(item.isMissing ? 0.5 : 1)
+        .padding(9)
+        .background(.white.opacity(hovering ? 0.13 : 0.075),
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(.white.opacity(0.10), lineWidth: 0.65)
+                .allowsHitTesting(false)
+        }
+        .offset(y: hovering && !reduceMotion ? -2 : 0)
+        .opacity(item.isMissing ? 0.55 : 1)
+        .onHover { hovering = $0 }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovering)
         .help(item.isMissing
-              ? String(localized: "shelf.missing", defaultValue: "Datei nicht gefunden") + " — " + item.name
+              ? "原文件已不存在" + " — " + item.name
               : item.name)
         .onDrag {
             // Don't hand over a file that no longer exists.
@@ -103,9 +114,9 @@ private struct ShelfItemView: View {
         }
         .contextMenu {
             ShareLink(item: item.url) {
-                Label(String(localized: "shelf.share", defaultValue: "Teilen …"), systemImage: "square.and.arrow.up")
+                Label("共享…", systemImage: "square.and.arrow.up")
             }
-            Button(String(localized: "shelf.remove", defaultValue: "Entfernen"), role: .destructive) { shelf.remove(item) }
+            Button("移除", role: .destructive) { shelf.remove(item) }
         }
     }
 }

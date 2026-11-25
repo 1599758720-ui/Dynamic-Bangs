@@ -1,0 +1,7 @@
+https://github.com/ungive/mediaremote-adapter
+Commit: 0e82bf1c44ec39554fbfc402ec88a48c6ae2a0fd
+BSD-3-Clause. Built from source for the local NetEase integration.
+Local extensions (2026-10-28): NetEase-only metadata requests and dedicated
+netease-send / netease-seek entry points. Commands use MRDestination and an
+explicit NetEase MRPlayerPath; they cannot fall through to the global player.
+Playback state is re-read in a fresh helper process after delivery.

@@ -4,18 +4,25 @@ import ServiceManagement
 final class StatusBarController: NSObject, NSMenuItemValidation {
     private let statusItem: NSStatusItem
     private let settingsWindow = SettingsWindowController()
-    /// Flips the notch pause and returns the *new* disabled state. Owned by
-    /// the app delegate so the menu item and the ⌥⌘N hotkey share one toggle.
-    private let onToggleNotch: () -> Bool
+    private let onToggleNotch: () -> Void
     /// Whether the island currently sits somewhere the user dragged it — the
     /// reset item is dead weight otherwise, so it enables on this.
     private let isNotchPlaced: () -> Bool
     private let onResetPlacement: () -> Void
     private var pauseItem: NSMenuItem?
+    private let onOpenTimer: () -> Void
+    private let onOpenDashboard: () -> Void
+    private let onOpenQuickActions: () -> Void
 
-    init(onToggleNotch: @escaping () -> Bool,
+    init(onToggleNotch: @escaping () -> Void,
          isNotchPlaced: @escaping () -> Bool,
-         onResetPlacement: @escaping () -> Void) {
+         onResetPlacement: @escaping () -> Void,
+         onOpenTimer: @escaping () -> Void,
+         onOpenDashboard: @escaping () -> Void,
+         onOpenQuickActions: @escaping () -> Void) {
+        self.onOpenDashboard = onOpenDashboard
+        self.onOpenQuickActions = onOpenQuickActions
+        self.onOpenTimer = onOpenTimer
         self.onToggleNotch = onToggleNotch
         self.isNotchPlaced = isNotchPlaced
         self.onResetPlacement = onResetPlacement
@@ -23,13 +30,26 @@ final class StatusBarController: NSObject, NSMenuItemValidation {
         super.init()
 
         if let button = statusItem.button {
-            button.image = NSImage(
-                systemSymbolName: "rectangle.topthird.inset.filled",
-                accessibilityDescription: "Côte d'OS"
-            )
+            button.image = AppBrand.statusIcon()
+            button.toolTip = AppBrand.name
         }
 
         let menu = NSMenu()
+        let dashboardItem = NSMenuItem(title: "展开工作台", action: #selector(openDashboard), keyEquivalent: "")
+        dashboardItem.target = self
+        menu.addItem(dashboardItem)
+        let searchItem = NSMenuItem(title: "快速搜索…", action: #selector(openQuickActions), keyEquivalent: "k")
+        searchItem.keyEquivalentModifierMask = [.command, .option]
+        searchItem.target = self
+        menu.addItem(searchItem)
+        let widgetsItem = NSMenuItem(title: "组件与缩略显示…", action: #selector(openWidgets), keyEquivalent: "")
+        widgetsItem.target = self
+        menu.addItem(widgetsItem)
+        let timerItem = NSMenuItem(title: "打开番茄钟", action: #selector(openTimer), keyEquivalent: "")
+        timerItem.target = self
+        menu.addItem(timerItem)
+        menu.addItem(.separator())
+
 
         // ⌥⌘N is registered globally via HotKeyCenter; the key equivalent here
         // is display only, so the menu teaches the shortcut.
@@ -75,7 +95,7 @@ final class StatusBarController: NSObject, NSMenuItemValidation {
         menu.addItem(.separator())
 
         menu.addItem(NSMenuItem(
-            title: String(localized: "menu.quit", defaultValue: "Côte d'OS beenden"),
+            title: String(localized: "menu.quit", defaultValue: "Quit Dynamic Bangs"),
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         ))
@@ -87,15 +107,17 @@ final class StatusBarController: NSObject, NSMenuItemValidation {
     /// (outline instead of filled), whichever of the two routes flipped it.
     func setNotchPaused(_ paused: Bool) {
         pauseItem?.state = paused ? .on : .off
-        statusItem.button?.image = NSImage(
-            systemSymbolName: paused ? "rectangle.topthird.inset" : "rectangle.topthird.inset.filled",
-            accessibilityDescription: "Côte d'OS"
-        )
+        statusItem.button?.image = AppBrand.statusIcon(paused: paused)
     }
 
     @objc private func toggleNotch() {
-        setNotchPaused(onToggleNotch())
+        onToggleNotch()
     }
+
+    @objc private func openTimer() { onOpenTimer() }
+    @objc private func openDashboard() { onOpenDashboard() }
+    @objc private func openQuickActions() { onOpenQuickActions() }
+    @objc private func openWidgets() { WidgetPreferencesWindow.shared.show() }
 
     @objc private func resetPlacement() {
         onResetPlacement()
@@ -122,7 +144,7 @@ final class StatusBarController: NSObject, NSMenuItemValidation {
         }
     }
 
-    @objc private func openSettings() {
+    @objc func openSettings() {
         settingsWindow.show()
     }
 }

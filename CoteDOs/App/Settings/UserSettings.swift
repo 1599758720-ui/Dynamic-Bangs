@@ -20,11 +20,13 @@ final class UserSettings: ObservableObject {
         case auto
         case spotify
         case appleMusic
+        case netease
 
         var id: String { rawValue }
 
         var localizedName: String {
             switch self {
+            case .netease: return "网易云音乐"
             case .auto: return String(localized: "source.auto", defaultValue: "Automatisch")
             case .spotify: return String(localized: "source.spotify", defaultValue: "Spotify")
             case .appleMusic: return String(localized: "source.appleMusic", defaultValue: "Apple Music")
@@ -36,6 +38,7 @@ final class UserSettings: ObservableObject {
         /// nil for `.auto`, which is a selection mode, not an app.
         var bundleID: String? {
             switch self {
+            case .netease: return "com.netease.163music"
             case .auto: return nil
             case .spotify: return "com.spotify.client"
             case .appleMusic: return "com.apple.Music"
@@ -111,6 +114,10 @@ final class UserSettings: ObservableObject {
         static let filesTabEnabled = "filesTabEnabled"
         static let captureTabEnabled = "captureTabEnabled"
         static let timerTabEnabled = "timerTabEnabled"
+    }
+
+    @Published var notchHeightExtra: Double {
+        didSet { defaults.set(notchHeightExtra, forKey: "localNotchHeightExtra") }
     }
 
     private let defaults: UserDefaults
@@ -260,6 +267,8 @@ final class UserSettings: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        self.notchHeightExtra = defaults.object(forKey: "localNotchHeightExtra") == nil
+            ? 0 : max(-1, min(6, defaults.double(forKey: "localNotchHeightExtra")))
         defaults.register(defaults: [
             Key.liveActivitiesEnabled: true,
             Key.audioRouteActivityEnabled: true,

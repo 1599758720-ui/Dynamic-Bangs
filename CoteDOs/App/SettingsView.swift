@@ -20,6 +20,6 @@ struct SettingsView: View {
             ObsidianSettings(settings: settings)
                 .tabItem { Label(String(localized: "settings.obsidian", defaultValue: "Obsidian"), systemImage: "square.and.pencil") }
         }
-        .frame(width: 520, height: 480)
+        .frame(width: 560, height: 540)
     }
 }

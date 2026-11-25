@@ -1,17 +1,14 @@
 import AppKit
 
-/// The panel's content view. The panel has a fixed (large) size, but only the
-/// area covered by the island is interactive — `hitTest` returns `nil` elsewhere
-/// so clicks fall through to the apps behind. Hover-to-expand is driven by a
-/// global mouse-moved monitor in `NotchWindowController` (deterministic at the
-/// top screen edge), not by a tracking area. The view is also a drag
-/// destination so dragging a file onto it auto-expands the notch.
+/// The host window has room for shadows and expansion. Only the island and
+/// the controller's file-drop region accept input.
 final class NotchContainerView: NSView {
-    /// Current interactive island rect in this view's coordinates (origin bottom-left).
     var islandRect: () -> NSRect = { .zero }
-    var onDragEntered: (() -> Void)?
+    var dropRect: () -> NSRect = { .zero }
+    var onDragEntered: (() -> Bool)?
     var onDragExited: (() -> Void)?
     var onDrop: (([URL]) -> Void)?
+    private var acceptsDrag = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -27,29 +24,34 @@ final class NotchContainerView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
         guard islandRect().contains(local) else { return nil }
-        return super.hitTest(point)
+        return super.hitTest(point) ?? self
     }
 
     // MARK: Drag destination
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        onDragEntered?()
-        return .copy
+        updateDropTarget(sender)
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        .copy
+        updateDropTarget(sender)
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
-        onDragExited?()
+        clearDropTarget()
+    }
+
+    override func draggingEnded(_ sender: NSDraggingInfo) {
+        clearDropTarget()
     }
 
     override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        true
+        acceptsDrag && containsDropLocation(sender)
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        defer { clearDropTarget() }
+        guard acceptsDrag, containsDropLocation(sender) else { return false }
         let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
         let urls = sender.draggingPasteboard.readObjects(
             forClasses: [NSURL.self],
@@ -58,5 +60,24 @@ final class NotchContainerView: NSView {
         guard !urls.isEmpty else { return false }
         onDrop?(urls)
         return true
+    }
+
+    private func updateDropTarget(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard sender.draggingSourceOperationMask.contains(.copy), containsDropLocation(sender) else {
+            clearDropTarget()
+            return []
+        }
+        if !acceptsDrag { acceptsDrag = onDragEntered?() ?? false }
+        return acceptsDrag ? .copy : []
+    }
+
+    private func containsDropLocation(_ sender: NSDraggingInfo) -> Bool {
+        dropRect().contains(convert(sender.draggingLocation, from: nil))
+    }
+
+    private func clearDropTarget() {
+        guard acceptsDrag else { return }
+        acceptsDrag = false
+        onDragExited?()
     }
 }
