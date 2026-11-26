@@ -68,16 +68,69 @@ struct WidgetLayout: Codable, Equatable {
     mutating func hide(_ widget: DashboardWidget) { widgets.removeAll { $0 == widget } }
 }
 
-/// Hit testing in rail coordinates supports differently sized cards and clamps edge drops.
+/// All positions are measured from the leading edge of the rail.
 enum WidgetReorder {
-    static func targetIndex(from source: Int, translation: Double, widths: [Double], spacing: Double = 12) -> Int {
-        guard widths.indices.contains(source) else { return 0 }
-        var x = 0.0
-        let centers = widths.map { width -> Double in
-            defer { x += width + spacing }
-            return x + width / 2
+    static let spacing = 12.0
+
+    struct Preview {
+        let targetIndex: Int
+        /// The change in slot center for each card, indexed in the original order.
+        let slotDisplacements: [Double]
+        /// The dragged center relative to its projected drop slot.
+        let settlingOffset: Double
+    }
+
+    static func centers(widths: [Double], spacing: Double = spacing) -> [Double] {
+        var leading = 0.0
+        return widths.map { width in
+            defer { leading += width + spacing }
+            return leading + width / 2
         }
-        let destination = centers[source] + translation
-        return centers.indices.min { abs(centers[$0] - destination) < abs(centers[$1] - destination) } ?? source
+    }
+
+    static func preview(from source: Int, translation: Double, widths: [Double],
+                        spacing: Double = spacing) -> Preview {
+        let originalCenters = centers(widths: widths, spacing: spacing)
+        guard widths.indices.contains(source) else {
+            return Preview(targetIndex: 0, slotDisplacements: widths.map { _ in 0 }, settlingOffset: 0)
+        }
+
+        var widthsWithoutDragged = widths
+        let draggedWidth = widthsWithoutDragged.remove(at: source)
+        let draggedCenter = originalCenters[source] + translation
+        var slotCenter = draggedWidth / 2
+        var target = source
+        var closestDistance = abs(translation)
+        for index in widths.indices {
+            let distance = abs(slotCenter - draggedCenter)
+            if distance < closestDistance ||
+                (distance == closestDistance && abs(index - source) < abs(target - source)) {
+                target = index
+                closestDistance = distance
+            }
+            if index < widthsWithoutDragged.count {
+                slotCenter += widthsWithoutDragged[index] + spacing
+            }
+        }
+
+        var order = Array(widths.indices)
+        order.remove(at: source)
+        order.insert(source, at: target)
+        let projectedCenters = centers(widths: order.map { widths[$0] }, spacing: spacing)
+        var displacements = widths.map { _ in 0.0 }
+        for (index, originalIndex) in order.enumerated() {
+            displacements[originalIndex] = projectedCenters[index] - originalCenters[originalIndex]
+        }
+        return Preview(targetIndex: target, slotDisplacements: displacements,
+                       settlingOffset: draggedCenter - projectedCenters[target])
+    }
+
+    static func targetIndex(from source: Int, translation: Double, widths: [Double],
+                            spacing: Double = spacing) -> Int {
+        preview(from: source, translation: translation, widths: widths, spacing: spacing).targetIndex
+    }
+
+    static func rubberBand(_ translation: Double, limit: Double = 10) -> Double {
+        limit * translation / (limit + abs(translation))
     }
 }

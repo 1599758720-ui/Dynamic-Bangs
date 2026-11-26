@@ -1,29 +1,22 @@
 import SwiftUI
 
-extension DashboardWidget {
-    var tint: Color {
-        switch self { case .music: return .pink; case .timer: return .orange
-        case .tasks: return .mint; case .system: return .green }
-    }
-}
-
 struct UsageRing: View {
     let value: Double?
     let color: Color
     var lineWidth: CGFloat = 3
-    var endColor: Color?
     var glowing = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorSchemeContrast) private var contrast
     var body: some View {
         ZStack {
-            Circle().strokeBorder(Color.white.opacity(0.10), lineWidth: lineWidth)
+            Circle().strokeBorder(Color.primary.opacity(contrast == .increased ? 0.22 : 0.10), lineWidth: lineWidth)
             if let value, value > 0 {
                 Circle().trim(from: 0, to: min(1, value))
-                    .stroke(AngularGradient(colors: [color, endColor ?? color], center: .center),
+                    .stroke(color,
                             style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                     .padding(lineWidth / 2)
                     .rotationEffect(.degrees(-90))
-                    .shadow(color: glowing ? color.opacity(0.40) : .clear, radius: 4)
+                    .shadow(color: glowing ? color.opacity(0.16) : .clear, radius: 4)
             }
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.35), value: value)
@@ -35,8 +28,8 @@ struct CompactSystemRings: View {
     @ObservedObject private var metrics = SystemMetrics.shared
     var body: some View {
         ZStack {
-            UsageRing(value: metrics.cpu, color: .green, lineWidth: 2.5).frame(width: 21, height: 21)
-            UsageRing(value: metrics.memory?.fraction, color: .yellow, lineWidth: 2.5).frame(width: 13, height: 13)
+            UsageRing(value: metrics.cpu, color: NotchStyle.systemBlue, lineWidth: 2.5).frame(width: 21, height: 21)
+            UsageRing(value: metrics.memory?.fraction, color: NotchStyle.memoryAccent, lineWidth: 2.5).frame(width: 13, height: 13)
         }
         .frame(width: 26, height: 26)
         .accessibilityElement(children: .ignore)
@@ -51,7 +44,7 @@ struct CompactBattery: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: batterySymbol(metrics.battery))
-                .foregroundStyle(metrics.battery?.charging == true ? .green : .white)
+                .foregroundStyle(metrics.battery?.charging == true ? NotchStyle.statusGreen : .white)
             Text(percentage(metrics.battery?.fraction)).monospacedDigit()
         }
         .font(.system(size: 11, weight: .medium))
@@ -61,20 +54,20 @@ struct CompactBattery: View {
 
 struct SystemWidgetContent: View {
     @ObservedObject private var metrics = SystemMetrics.shared
-    private let emerald = Color(red: 0.32, green: 0.88, blue: 0.57)
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 ZStack {
-                    UsageRing(value: metrics.cpu, color: emerald, lineWidth: 5.5)
+                    UsageRing(value: metrics.cpu, color: NotchStyle.systemBlue, lineWidth: 5.5)
                         .frame(width: 68, height: 68)
-                    UsageRing(value: metrics.memory?.fraction, color: NotchStyle.amber, lineWidth: 5.5)
+                    UsageRing(value: metrics.memory?.fraction, color: NotchStyle.memoryAccent, lineWidth: 5.5)
                         .frame(width: 48, height: 48)
                 }
                 VStack(alignment: .leading, spacing: 6) {
-                    reading("CPU", value: percentage(metrics.cpu), color: emerald)
-                    reading("内存", value: percentage(metrics.memory?.fraction), color: NotchStyle.amber)
+                    reading("CPU", value: percentage(metrics.cpu), color: NotchStyle.systemBlue)
+                    reading("内存", value: percentage(metrics.memory?.fraction), color: NotchStyle.memoryAccent)
                     Text(memoryUsage)
                         .font(.system(size: 9)).monospacedDigit()
                         .foregroundStyle(NotchStyle.secondary).lineLimit(1).minimumScaleFactor(0.8)
@@ -84,7 +77,7 @@ struct SystemWidgetContent: View {
             .frame(maxHeight: .infinity)
             HStack(spacing: 6) {
                 Image(systemName: batterySymbol(metrics.battery))
-                    .foregroundStyle(metrics.battery?.charging == true ? emerald : .white)
+                    .foregroundStyle(metrics.battery?.charging == true ? NotchStyle.statusGreen : NotchStyle.primaryText)
                 if let battery = metrics.battery {
                     Text(percentage(battery.fraction)).fontWeight(.semibold).monospacedDigit()
                     Spacer(minLength: 2)
@@ -96,8 +89,12 @@ struct SystemWidgetContent: View {
                 }
             }
             .font(.system(size: 10))
-            .padding(.horizontal, 10).frame(height: 28)
-            .background(.white.opacity(0.095), in: Capsule())
+            .padding(.horizontal, NotchStyle.Spacing.lg).frame(height: 28)
+            .overlay(alignment: .top) {
+                Rectangle().fill(NotchStyle.hairline(contrast))
+                    .frame(height: NotchStyle.hairlineWidth)
+                    .accessibilityHidden(true)
+            }
             .accessibilityElement(children: .combine)
         }
     }
@@ -112,10 +109,13 @@ struct SystemWidgetContent: View {
 
     private func reading(_ name: String, value: String, color: Color) -> some View {
         HStack(spacing: 4) {
-            Circle().fill(color).frame(width: 4, height: 4)
             Text(name).foregroundStyle(NotchStyle.secondary).fixedSize()
             Spacer(minLength: 1)
-            Text(value).monospacedDigit().fontWeight(.bold).fixedSize()
+            Text(value)
+                .font(NotchStyle.Typography.metric(11))
+                .monospacedDigit()
+                .foregroundStyle(color)
+                .fixedSize()
         }
         .font(.system(size: 11))
         .accessibilityElement(children: .combine)

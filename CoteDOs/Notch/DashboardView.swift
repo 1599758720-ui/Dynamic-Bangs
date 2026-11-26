@@ -8,40 +8,54 @@ struct DashboardView: View {
     let spectrum: SpectrumAnalyzer
     var activity: NotchActivity?
     @ObservedObject private var store = WidgetStore.shared
-    @State private var dragged: DashboardWidget?
-    @State private var dragOffset: CGFloat = 0
-    @State private var hoveredWidget: DashboardWidget?
+    @State private var drag: CardDrag?
+    @State private var settling: Settlement?
+    @State private var railOrigin: CGFloat = 0
+    @GestureState private var trackingDrag = false
     @State private var failedSystemTool: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
 
+    private struct CardDrag {
+        let widget: DashboardWidget
+        let widgets: [DashboardWidget]
+        let railOrigin: CGFloat
+        var translation: CGSize = .zero
+    }
+
+    private struct Settlement: Equatable {
+        let widget: DashboardWidget
+        let id = UUID()
+    }
+
+    private let cardHeight: CGFloat = 204
+    private let spacing = CGFloat(WidgetReorder.spacing)
+    private let railInset = NotchStyle.Spacing.railInset
+    private var motion: Animation? { reduceMotion ? nil : NotchStyle.Motion.layout }
+
+    private var railContentWidth: CGFloat {
+        let widgets = store.layout.widgets
+        return widgets.reduce(CGFloat.zero) { $0 + $1.cardWidth }
+            + CGFloat(max(0, widgets.count - 1)) * spacing
+    }
+
     var body: some View {
         GeometryReader { geometry in
             ScrollViewReader { proxy in
-                VStack(spacing: 12) {
-                    if store.layout.widgets.isEmpty {
-                        VStack(spacing: 10) {
-                            Image(systemName: "rectangle.stack.badge.plus").font(.title2).foregroundStyle(NotchStyle.secondary)
-                            Text("工作台里还没有组件").font(.system(size: 13, weight: .medium))
-                            if !viewModel.isEditingWidgets { addMenu }
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        ScrollView(.horizontal) {
-                            HStack(alignment: .top, spacing: 12) {
-                                ForEach(store.layout.widgets) { widget in
-                                    card(widget, proxy: proxy)
-                                        .offset(x: dragged == widget ? dragOffset : 0)
-                                        .scaleEffect(dragged == widget && !reduceMotion ? 1.025 : 1)
-                                        .zIndex(dragged == widget ? 1 : 0)
-                                }
+                VStack(spacing: NotchStyle.Spacing.xs) {
+                    ZStack {
+                        widgetRail(width: geometry.size.width)
+                        if store.layout.widgets.isEmpty {
+                            VStack(spacing: 10) {
+                                Image(systemName: "rectangle.stack.badge.plus").font(.title2)
+                                    .foregroundStyle(NotchStyle.secondary)
+                                Text("工作台里还没有组件").font(.system(size: 13, weight: .medium))
+                                if !viewModel.isEditingWidgets { addMenu }
                             }
-                            .padding(.vertical, 4)
-                            .coordinateSpace(name: "widgetRail")
+                            .transition(.opacity)
                         }
-                        .scrollIndicators(.hidden)
-                        .frame(height: 212)
                     }
+                    .frame(height: cardHeight + 18)
                     utilityStrip(proxy: proxy, width: geometry.size.width)
                     if let error = store.saveError {
                         HStack { Text(error); Button("重试") { store.save() } }
@@ -50,6 +64,17 @@ struct DashboardView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        }
+        .coordinateSpace(name: "dashboardCanvas")
+        .animation(motion, value: viewModel.isEditingWidgets)
+        .onChange(of: viewModel.isEditingWidgets) { _, editing in
+            if !editing { releaseDrag() }
+        }
+        .onChange(of: trackingDrag) { _, tracking in
+            if !tracking { releaseDrag() }
+        }
+        .onChange(of: store.layout.widgets) { _, widgets in
+            if let drag, drag.widgets != widgets { releaseDrag() }
         }
         .alert("无法打开应用", isPresented: Binding(
             get: { failedSystemTool != nil },
@@ -63,8 +88,8 @@ struct DashboardView: View {
 
     private func utilityStrip(proxy: ScrollViewProxy, width: CGFloat) -> some View {
         let widgets = store.layout.widgets
-        let railWidth = widgets.reduce(CGFloat.zero) { $0 + $1.cardWidth } + CGFloat(max(0, widgets.count - 1)) * 12
-        return HStack(spacing: 8) {
+        let railWidth = railContentWidth + 2 * railInset
+        return HStack(spacing: NotchStyle.Spacing.md) {
             if viewModel.isEditingWidgets {
                 addMenu
                 Text("拖动卡片可排序")
@@ -74,7 +99,7 @@ struct DashboardView: View {
                 ScrollView(.horizontal) {
                     HStack(spacing: 6) {
                         Button("今日任务", systemImage: "checklist") { DailyTasksWindow.shared.show() }
-                            .buttonStyle(NotchButtonStyle(tint: .mint, softTint: true))
+                            .buttonStyle(NotchButtonStyle())
                         ForEach(QuickActionsCatalog.availableSystemTools) { tool in
                             Button(tool.title, systemImage: tool.symbol) { launch(tool) }
                                 .buttonStyle(NotchButtonStyle())
@@ -83,9 +108,8 @@ struct DashboardView: View {
                             .buttonStyle(NotchButtonStyle())
                         if let activity {
                             Label(activity.title, systemImage: activity.icon)
-                                .foregroundStyle(activity.tint)
+                                .foregroundStyle(NotchStyle.primaryText)
                                 .padding(.horizontal, 9).frame(height: 26)
-                                .background(activity.tint.opacity(0.12), in: Capsule())
                                 .accessibilityValue(activity.progress.map { percentage($0) } ?? activity.detail ?? "")
                         }
                     }
@@ -99,14 +123,21 @@ struct DashboardView: View {
                 scrollButton("移到组件末尾", symbol: "chevron.right", widget: last, anchor: .trailing, proxy: proxy)
             }
         }
-        .font(.system(size: 11, weight: .medium))
-        .frame(height: 28)
+        .font(NotchStyle.Typography.control)
+        .padding(.horizontal, NotchStyle.Spacing.sm)
+        .frame(height: 34)
+        .overlay(alignment: .top) {
+            Rectangle().fill(NotchStyle.hairline(contrast))
+                .frame(height: NotchStyle.hairlineWidth)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
 
     private func scrollButton(_ title: String, symbol: String, widget: DashboardWidget,
                               anchor: UnitPoint, proxy: ScrollViewProxy) -> some View {
         Button(title, systemImage: symbol) {
-            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo(widget.id, anchor: anchor) }
+            withAnimation(motion) { proxy.scrollTo(widget.id, anchor: anchor) }
         }
         .labelStyle(.iconOnly)
         .buttonStyle(NotchButtonStyle(shape: .circle(26)))
@@ -126,68 +157,163 @@ struct DashboardView: View {
         Menu {
             if store.available.isEmpty { Text("全部组件已添加") }
             ForEach(store.available) { widget in
-                Button { store.add(widget) } label: { Label(widget.title, systemImage: widget.symbol) }
+                Button { withAnimation(motion) { store.add(widget) } } label: { Label(widget.title, systemImage: widget.symbol) }
             }
         } label: {
             Label("添加组件", systemImage: "plus")
                 .padding(.horizontal, 8).frame(height: 26)
         }
         .menuStyle(.borderlessButton).fixedSize().font(.system(size: 11))
-        .background(.white.opacity(0.095), in: Capsule())
-        .foregroundStyle(.white).disabled(store.available.isEmpty)
+        .foregroundStyle(NotchStyle.controlInk).disabled(store.available.isEmpty)
     }
 
-    private func card(_ widget: DashboardWidget, proxy: ScrollViewProxy) -> some View {
-        let hovered = hoveredWidget == widget
-        let shape = RoundedRectangle(cornerRadius: NotchStyle.tileCornerRadius, style: .continuous)
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                if viewModel.isEditingWidgets {
-                    Image(systemName: "line.3.horizontal").foregroundColor(.white.opacity(0.65))
-                        .frame(width: 18, height: 24).contentShape(Rectangle())
-                        .help("拖动\(widget.title)调整顺序；也可使用旁边的菜单")
-                        .gesture(DragGesture(minimumDistance: 5, coordinateSpace: .named("widgetRail"))
-                            .onChanged { value in
-                                if dragged == nil { dragged = widget }
-                                dragOffset = value.translation.width
+    private func widgetRail(width: CGFloat) -> some View {
+        let widgets = store.layout.widgets
+        let widths = widgets.map { Double($0.cardWidth) }
+        let centers = WidgetReorder.centers(widths: widths)
+        let activeDrag = drag.flatMap { $0.widgets == widgets ? $0 : nil }
+        let preview = activeDrag.flatMap { drag in
+            widgets.firstIndex(of: drag.widget).map {
+                WidgetReorder.preview(from: $0, translation: horizontalTranslation(of: drag), widths: widths)
+            }
+        }
+
+        return ScrollView(.horizontal) {
+            // Slot anchors keep scrolling independent from the visual positions of moving cards.
+            HStack(spacing: spacing) {
+                ForEach(widgets) { widget in
+                    Color.clear.frame(width: widget.cardWidth, height: cardHeight).id(widget.id)
+                }
+            }
+            .scrollTargetLayout()
+            .accessibilityHidden(true)
+            .overlay(alignment: .topLeading) {
+                ZStack(alignment: .topLeading) {
+                    ForEach(Array(widgets.enumerated()), id: \.element) { index, widget in
+                        let tracking = activeDrag?.widget == widget
+                        let settlingHere = settling?.widget == widget
+                        let slotShift = preview?.slotDisplacements[index] ?? 0
+                        let dropDelta = tracking ? (preview?.settlingOffset ?? 0) : 0
+                        let x = centers[index] - widths[index] / 2 + slotShift + dropDelta
+                        let y = tracking && !reduceMotion
+                            ? WidgetReorder.rubberBand(Double(activeDrag?.translation.height ?? 0)) : 0
+
+                        card(widget, lifted: tracking)
+                            .transaction { transaction in
+                                if tracking { transaction.animation = nil }
+                            } body: { content in
+                                content.offset(x: x, y: y)
                             }
-                            .onEnded { value in
-                                guard let start = store.layout.widgets.firstIndex(of: widget) else { dragged = nil; return }
-                                let target = WidgetReorder.targetIndex(from: start, translation: Double(value.translation.width),
-                                    widths: store.layout.widgets.map { Double($0.cardWidth) })
-                                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
-                                    store.move(widget, to: target)
-                                    dragged = nil; dragOffset = 0
-                                }
-                                DispatchQueue.main.async {
-                                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
-                                        proxy.scrollTo(widget.id, anchor: .center)
-                                    }
-                                }
-                            })
+                            .zIndex(tracking ? 2 : settlingHere ? 1 : 0)
+                            .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.96)))
+                    }
                 }
-                HStack(spacing: 6) {
-                    Image(systemName: widget.symbol).font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(widget.tint).frame(width: 22, height: 22)
-                        .background(widget.tint.opacity(0.12), in: Circle())
-                    Text(widget.title).lineLimit(1).font(.system(size: 12.5, weight: .semibold))
+            }
+            .onGeometryChange(for: CGFloat.self) { geometry in
+                geometry.frame(in: .named("dashboardCanvas")).minX
+            } action: { railOrigin = $0 }
+            .padding(.vertical, 9)
+        }
+        .contentMargins(.horizontal, railInset, for: .scrollContent)
+        .scrollTargetBehavior(WidgetRailScrollBehavior(snaps: !trackingDrag && activeDrag == nil && settling == nil))
+        .scrollIndicators(.hidden)
+        .scrollClipDisabled()
+        .mask {
+            if activeDrag != nil || settling != nil {
+                // The panel silhouette is the only visible boundary for lifted cards.
+                Rectangle()
+                    .padding(.horizontal, -NotchLayout.expandedContentInset)
+                    .padding(.vertical, -24)
+            } else {
+                railEdgeFade(width: width)
+                    .padding(.vertical, -7)
+            }
+        }
+    }
+
+    private func railEdgeFade(width: CGFloat) -> some View {
+        let fade = min(16 / max(width, 1), 0.5)
+        let clipsLeft = railOrigin < railInset - 1
+        let clipsRight = railOrigin + railContentWidth > width - railInset + 1
+        return LinearGradient(stops: [
+            .init(color: clipsLeft ? .clear : .black, location: 0),
+            .init(color: .black, location: fade),
+            .init(color: .black, location: 1 - fade),
+            .init(color: clipsRight ? .clear : .black, location: 1),
+        ], startPoint: UnitPoint(x: 0, y: 0.5), endPoint: UnitPoint(x: 1, y: 0.5))
+    }
+
+    private func horizontalTranslation(of drag: CardDrag) -> Double {
+        Double(drag.translation.width + drag.railOrigin - railOrigin)
+    }
+
+    private func cardDragGesture(for widget: DashboardWidget) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named("dashboardCanvas"))
+            .updating($trackingDrag) { _, tracking, _ in tracking = true }
+            .onChanged { value in
+                guard viewModel.isEditingWidgets, settling == nil else { return }
+                let widgets = store.layout.widgets
+                if drag == nil {
+                    drag = CardDrag(widget: widget, widgets: widgets, railOrigin: railOrigin)
                 }
+                guard drag?.widget == widget, drag?.widgets == widgets,
+                      let current = drag, let source = widgets.firstIndex(of: widget) else { return }
+                let widths = widgets.map { Double($0.cardWidth) }
+                var next = current
+                next.translation = value.translation
+                let previousTarget = WidgetReorder.targetIndex(from: source,
+                    translation: horizontalTranslation(of: current), widths: widths)
+                let nextTarget = WidgetReorder.targetIndex(from: source,
+                    translation: horizontalTranslation(of: next), widths: widths)
+                withAnimation(previousTarget == nextTarget ? nil : motion) { drag = next }
+            }
+            .onEnded { value in
+                guard var drag, drag.widget == widget, drag.widgets == store.layout.widgets,
+                      let source = drag.widgets.firstIndex(of: widget) else { return }
+                drag.translation = value.translation
+                let target = WidgetReorder.targetIndex(from: source,
+                    translation: horizontalTranslation(of: drag), widths: drag.widgets.map { Double($0.cardWidth) })
+                releaseDrag(to: target)
+            }
+    }
+
+    private func releaseDrag(to target: Int? = nil) {
+        guard let drag else { return }
+        let release = Settlement(widget: drag.widget)
+        settling = release
+        // With stable card identities and absolute offsets, the spring starts at the
+        // presentation position even though the underlying order changes immediately.
+        withAnimation(motion, completionCriteria: .removed) {
+            self.drag = nil
+            if let target { store.move(drag.widget, to: target) }
+        } completion: {
+            if settling == release { settling = nil }
+        }
+    }
+
+    private func card(_ widget: DashboardWidget, lifted: Bool) -> some View {
+        let editing = viewModel.isEditingWidgets
+        return VStack(alignment: .leading, spacing: NotchStyle.Spacing.lg) {
+            HStack(spacing: NotchStyle.Spacing.sm) {
+                Image(systemName: widget.symbol)
+                    .font(NotchStyle.Typography.cardSymbol)
+                    .foregroundStyle(NotchStyle.headerSymbol(contrast))
+                    .accessibilityHidden(true)
+                Text(widget.title).font(NotchStyle.Typography.cardTitle)
+                    .foregroundStyle(NotchStyle.primaryText)
+                    .lineLimit(1)
                 Spacer(minLength: 2)
-                if widget == .tasks { TasksProgress() }
-                if viewModel.isEditingWidgets {
-                    Menu {
-                        Button("前移") { store.move(widget, by: -1) }.disabled(store.layout.widgets.first == widget)
-                        Button("后移") { store.move(widget, by: 1) }.disabled(store.layout.widgets.last == widget)
-                        Divider()
-                        Button("隐藏组件，保留数据") { store.hide(widget) }
-                    } label: { Image(systemName: "ellipsis") }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().accessibilityLabel("调整\(widget.title)")
-                } else {
+                if !editing {
+                    if widget == .tasks { TasksProgress() }
                     Button { open(widget) } label: { Image(systemName: "arrow.up.right") }
                         .buttonStyle(NotchButtonStyle(shape: .circle(24))).font(.system(size: 9))
-                        .accessibilityLabel("打开\(widget.title)详情").help("打开\(widget.title)详情")
+                        .accessibilityLabel("打开\(widget.title)")
+                        .help("打开详情")
+                        .transition(.opacity)
                 }
-            }.frame(height: 24)
+            }
+            .frame(height: 24)
+
             Group {
                 switch widget {
                 case .music: MusicWidgetBody(nowPlaying: nowPlaying, spectrum: spectrum)
@@ -197,35 +323,69 @@ struct DashboardView: View {
                 }
             }
         }
-        .padding(14).frame(width: widget.cardWidth, height: 204, alignment: .topLeading)
+        .padding(NotchStyle.Spacing.cardPadding)
+        .frame(width: widget.cardWidth, height: cardHeight, alignment: .topLeading)
         .background {
-            shape.fill(LinearGradient(
-                colors: [hovered ? NotchStyle.tileHoverFillTop : NotchStyle.tileFillTop,
-                         hovered ? NotchStyle.tileHoverFillBottom : NotchStyle.tileFillBottom],
-                startPoint: .top, endPoint: .bottom
-            ))
-            .overlay {
-                shape.fill(RadialGradient(colors: [widget.tint.opacity(hovered ? 0.16 : 0.11), .clear],
-                                          center: .topLeading, startRadius: 0, endRadius: 160))
+            if widget == .music {
+                MusicWidgetWash(nowPlaying: nowPlaying)
+                    .clipShape(.rect(cornerRadius: NotchStyle.Radius.card))
             }
         }
+        .allowsHitTesting(!editing)
+        .accessibilityHidden(editing)
+        .modifier(NotchTileChrome(lifted: lifted))
         .overlay {
-            Group {
-                if viewModel.isEditingWidgets {
-                    shape.strokeBorder(widget.tint.opacity(0.55), lineWidth: 0.65)
-                } else {
-                    shape.strokeBorder(LinearGradient(
-                        colors: [.white.opacity(contrast == .increased ? 0.38 : 0.20), .white.opacity(0.05)],
-                        startPoint: .top, endPoint: .bottom
-                    ), lineWidth: 0.65)
+            if editing {
+                reorderSurface(widget)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if editing {
+                Button("隐藏\(widget.title)", systemImage: "minus") {
+                    withAnimation(motion) { store.hide(widget) }
+                }
+                .labelStyle(.iconOnly)
+                .font(.system(size: 10, weight: .semibold))
+                .buttonStyle(NotchButtonStyle(tint: NotchStyle.headerSymbol(contrast), shape: .circle(24)))
+                .help("隐藏组件并保留数据")
+                .padding(NotchStyle.Spacing.cardPadding)
+                .transition(.opacity)
+            }
+        }
+        .scaleEffect(lifted && !reduceMotion ? 1.035 : 1)
+        .animation(motion, value: lifted)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func reorderSurface(_ widget: DashboardWidget) -> some View {
+        let widgets = store.layout.widgets
+        return Color.clear
+            .contentShape(RoundedRectangle(cornerRadius: NotchStyle.Radius.card))
+            .highPriorityGesture(cardDragGesture(for: widget))
+            .focusable()
+            .onKeyPress(.leftArrow) { move(widget, by: -1) }
+            .onKeyPress(.rightArrow) { move(widget, by: 1) }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(widget.title)
+            .accessibilityHint("左右拖动或按方向键调整顺序")
+            .accessibilityActions {
+                if widgets.first != widget {
+                    Button("前移") { _ = move(widget, by: -1) }
+                }
+                if widgets.last != widget {
+                    Button("后移") { _ = move(widget, by: 1) }
                 }
             }
-            .allowsHitTesting(false)
+    }
+
+    private func move(_ widget: DashboardWidget, by step: Int) -> KeyPress.Result {
+        let widgets = store.layout.widgets
+        guard drag == nil, settling == nil,
+              let index = widgets.firstIndex(of: widget), widgets.indices.contains(index + step) else {
+            return .ignored
         }
-        .contentShape(shape)
-        .onHover { hoveredWidget = $0 ? widget : nil }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: hoveredWidget == widget)
-        .id(widget.id)
+        withAnimation(motion) { store.move(widget, by: step) }
+        return .handled
     }
 
     private func open(_ widget: DashboardWidget) {
@@ -233,6 +393,25 @@ struct DashboardView: View {
         viewModel.selectedWidget = widget
         viewModel.selectedTab = widget == .timer ? .timer : .music
         viewModel.showsDashboard = false
+    }
+}
+
+/// Keep the same ScrollView and registered card targets throughout reordering.
+private struct WidgetRailScrollBehavior: ScrollTargetBehavior {
+    let snaps: Bool
+
+    func updateTarget(_ target: inout ScrollTarget, context: TargetContext) {
+        if snaps {
+            ViewAlignedScrollTargetBehavior(limitBehavior: .automatic).updateTarget(&target, context: context)
+        }
+    }
+}
+
+private struct MusicWidgetWash: View {
+    @ObservedObject var nowPlaying: NowPlayingManager
+
+    var body: some View {
+        NotchArtworkWash(color: nowPlaying.artworkColor, center: UnitPoint(x: 0.23, y: 0.29))
     }
 }
 
@@ -256,7 +435,6 @@ private struct MusicWidgetBody: View {
             Button(action: nowPlaying.openCurrentTrack) {
                 MusicArtwork(url: nowPlaying.track?.artworkURL, playing: nowPlaying.isPlaying && nowPlaying.screensAwake,
                              size: 54, appearance: store.layout.musicAppearance)
-                    .shadow(color: (nowPlaying.artworkColor ?? .black).opacity(0.30), radius: 9, y: 3)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("打开当前音乐播放器")
@@ -269,7 +447,7 @@ private struct MusicWidgetBody: View {
                     .font(.system(size: 11)).foregroundStyle(NotchStyle.secondary).lineLimit(1)
                 if nowPlaying.track != nil {
                     Label(nowPlaying.sourceName, systemImage: "circle.fill")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: 9))
                         .foregroundStyle(NotchStyle.secondary)
                         .lineLimit(1)
                 }
@@ -277,9 +455,9 @@ private struct MusicWidgetBody: View {
         }.frame(height: 56)
 
         GeometryReader { geometry in
-            Capsule().fill(.white.opacity(0.12))
+            Capsule().fill(NotchStyle.controlInk.opacity(0.13))
                 .overlay(alignment: .leading) {
-                    Capsule().fill(.white).frame(width: geometry.size.width * nowPlaying.playbackFraction)
+                    Capsule().fill(NotchStyle.controlInk).frame(width: geometry.size.width * nowPlaying.playbackFraction)
                 }
         }
         .frame(height: 3)
@@ -305,8 +483,7 @@ private struct MusicWidgetBody: View {
                     .buttonStyle(NotchButtonStyle(tint: .orange, shape: .circle(26)))
                     .help(error)
             } else {
-                WidgetWave(spectrum: spectrum, active: nowPlaying.isPlaying && nowPlaying.screensAwake,
-                           color: nowPlaying.artworkColor ?? .pink, compact: true)
+                WidgetWave(spectrum: spectrum, active: nowPlaying.isPlaying && nowPlaying.screensAwake, compact: true)
             }
         }
     }
@@ -315,11 +492,14 @@ private struct MusicWidgetBody: View {
 struct WidgetWave: View {
     @ObservedObject var spectrum: SpectrumAnalyzer
     var active: Bool
-    var color: Color = .white
+    var color: Color?
     var compact = false
+    @Environment(\.colorScheme) private var scheme
+
     var body: some View {
+        let ink = color ?? (scheme == .dark ? .white : .black)
         LiveWaveBarsView(levels: spectrum.bands, isLive: spectrum.isLive, showsLiveBands: active, isActive: active,
-            tint: color, count: compact ? 4 : 24, maxHeight: compact ? 13 : 23,
+            tint: ink, count: compact ? 4 : 24, maxHeight: compact ? 13 : 23,
             barWidth: compact ? 2 : 3, spacing: compact ? 2 : 3)
             .accessibilityLabel(spectrum.isLive ? "实时系统音频频谱" : "频谱等待音频授权")
     }
@@ -328,6 +508,7 @@ struct WidgetWave: View {
 private struct TimerWidgetBody: View {
     @ObservedObject var pomodoro: PomodoroManager
     @ObservedObject private var settings = UserSettings.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var preset: TimerPreset? {
         settings.timerPresets.first { $0.id == pomodoro.selectedPresetID } ?? settings.timerPresets.first
@@ -336,17 +517,18 @@ private struct TimerWidgetBody: View {
     var body: some View {
         ZStack {
             UsageRing(value: pomodoro.phase == .idle ? 0 : pomodoro.progress,
-                      color: .orange, lineWidth: 5.5, endColor: NotchStyle.amber, glowing: pomodoro.phase == .running)
+                      color: NotchStyle.focusOrange, lineWidth: 5.5, glowing: pomodoro.phase == .running)
                 .frame(width: 88, height: 88)
             VStack(spacing: 3) {
                 Text(pomodoro.remainingText ?? preset?.formattedDuration ?? "25:00")
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .font(NotchStyle.Typography.metric(20))
                     .monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
                 Text(pomodoro.phase == .paused ? "已暂停" : (pomodoro.activeName ?? "准备专注"))
                     .font(.system(size: 9.5)).foregroundStyle(NotchStyle.secondary).lineLimit(1)
             }.frame(width: 68)
         }
         .frame(maxWidth: .infinity)
+        .animation(reduceMotion ? nil : NotchStyle.Motion.surface, value: pomodoro.phase)
         Spacer(minLength: 0)
         HStack(spacing: 6) {
             Button {
@@ -359,29 +541,32 @@ private struct TimerWidgetBody: View {
                 Label(pomodoro.phase == .running ? "暂停" : (pomodoro.phase == .paused ? "继续" : "开始"),
                       systemImage: pomodoro.phase == .running ? "pause.fill" : "play.fill")
                     .frame(maxWidth: .infinity)
+                    .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
             }
-            .buttonStyle(NotchButtonStyle(tint: .orange, softTint: true))
+            .buttonStyle(NotchButtonStyle(tint: pomodoro.phase == .running ? NotchStyle.focusOrange : NotchStyle.controlInk))
             .disabled(pomodoro.phase == .idle && preset == nil)
             Button("调整番茄钟时长", systemImage: "slider.horizontal.3") { TimerPresetWindow.shared.show() }
                 .labelStyle(.iconOnly)
                 .buttonStyle(NotchButtonStyle(shape: .circle(28)))
                 .help("调整时长与休息安排")
         }
-        .font(.system(size: 11, weight: .semibold))
+        .font(NotchStyle.Typography.control)
+        .animation(reduceMotion ? nil : NotchStyle.Motion.surface, value: pomodoro.phase)
     }
 }
 
 private struct TasksProgress: View {
     @ObservedObject private var tasks = DailyTasks.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         if !tasks.today.isEmpty {
             let done = tasks.today.filter(\.isDoneToday).count
             Text("\(done)/\(tasks.today.count)")
                 .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.mint)
-                .padding(.horizontal, 6).padding(.vertical, 3)
-                .background(.mint.opacity(0.12), in: Capsule())
+                .foregroundStyle(done == tasks.today.count ? NotchStyle.taskAccent : NotchStyle.secondary)
+                .contentTransition(reduceMotion ? .identity : .numericText())
+                .animation(reduceMotion ? nil : NotchStyle.Motion.surface, value: done)
                 .accessibilityLabel("已完成 \(done) 项，共 \(tasks.today.count) 项")
         }
     }
@@ -389,12 +574,13 @@ private struct TasksProgress: View {
 
 private struct TasksWidgetBody: View {
     @ObservedObject private var tasks = DailyTasks.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         if tasks.today.isEmpty {
             VStack(spacing: 7) {
                 Image(systemName: "checkmark.circle").font(.system(size: 22, weight: .light))
-                Text("今天没有待办").font(.system(size: 11, weight: .medium))
+                Text("今天没有待办").font(NotchStyle.Typography.control)
             }
             .foregroundStyle(NotchStyle.secondary)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -405,10 +591,10 @@ private struct TasksWidgetBody: View {
                         Button { tasks.toggle(task.id) } label: {
                             Image(systemName: task.isDoneToday ? "checkmark.circle.fill" : "circle")
                                 .font(.system(size: 14))
-                                .foregroundStyle(task.isDoneToday ? .mint : NotchStyle.secondary)
-                                .frame(width: 19, height: 19)
+                                .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(NotchButtonStyle(tint: task.isDoneToday ? NotchStyle.taskAccent : NotchStyle.secondary,
+                                                    shape: .circle(20)))
                         .accessibilityLabel((task.isDoneToday ? "取消完成：" : "完成任务：") + task.title)
                         Button { DailyTasksWindow.shared.edit(task) } label: {
                             Text(task.title).font(.system(size: 12)).lineLimit(1)
@@ -418,6 +604,7 @@ private struct TasksWidgetBody: View {
                         .buttonStyle(.plain)
                         .help("编辑 \(task.title)")
                     }
+                    .animation(reduceMotion ? nil : NotchStyle.Motion.surface, value: task.isDoneToday)
                 }
             }
             Spacer(minLength: 0)
@@ -429,11 +616,11 @@ private struct TasksWidgetBody: View {
             } label: {
                 Label("新建", systemImage: "plus").frame(maxWidth: .infinity)
             }
-            .buttonStyle(NotchButtonStyle(tint: .mint, softTint: true))
+            .buttonStyle(NotchButtonStyle())
             Button("全部") { DailyTasksWindow.shared.show() }
                 .buttonStyle(NotchButtonStyle())
         }
-        .font(.system(size: 11, weight: .semibold))
+        .font(NotchStyle.Typography.control)
     }
 }
 

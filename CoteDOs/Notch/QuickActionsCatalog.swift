@@ -132,7 +132,7 @@ enum QuickActionsCatalog {
     private static let maxDirectoryDepth = 2
 
     static let availableSystemTools: [QuickActionItem] = [
-        ("AirDrop", "airdrop", "/System/Library/CoreServices/Finder.app/Contents/Applications/AirDrop.app"),
+        ("AirDrop", "dot.radiowaves.left.and.right", "/System/Library/CoreServices/Finder.app/Contents/Applications/AirDrop.app"),
         ("Siri", "waveform.circle", "/System/Applications/Siri.app"),
     ].compactMap { title, symbol, path in
         var isDirectory: ObjCBool = false

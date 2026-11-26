@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Quick-search surface for Côte d'OS inside the dark-Aqua notch workbench.
+/// Quick-search surface for Côte d'OS inside the notch workbench.
 ///
 /// Exposes built-in workbench destinations alongside a bounded, off-main index of
 /// local macOS applications. Selecting an item via Return or pointer click reports
@@ -80,14 +80,14 @@ struct QuickActionsView: View {
     private var searchBar: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(isSearchFocused ? .white.opacity(0.92) : NotchStyle.secondary)
+                .font(NotchStyle.Typography.cardSymbol)
+                .foregroundStyle(isSearchFocused ? NotchStyle.controlInk.opacity(0.92) : NotchStyle.secondary)
                 .accessibilityHidden(true)
 
             TextField("搜索工作台功能或本机应用…", text: $query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
-                .foregroundStyle(.white)
+                .foregroundStyle(NotchStyle.primaryText)
                 .focused($isSearchFocused)
                 .accessibilityLabel("快速搜索")
                 .accessibilityHint("输入名称筛选工作台功能与本机应用，按上下方向键选择，按回车打开")
@@ -116,17 +116,16 @@ struct QuickActionsView: View {
         }
         .padding(.horizontal, 11)
         .frame(height: 36)
-        .background {
-            Capsule()
-                .fill(Color.white.opacity(isSearchFocused ? 0.12 : 0.075))
-        }
+        .background(NotchStyle.controlInk.opacity(isSearchFocused ? NotchStyle.Opacity.hover : NotchStyle.Opacity.control),
+                    in: RoundedRectangle(cornerRadius: NotchStyle.Radius.control))
         .overlay {
-            Capsule()
-                .strokeBorder(LinearGradient(colors: [.white.opacity(isSearchFocused ? 0.35 : 0.14),
-                                               .white.opacity(isSearchFocused ? 0.11 : 0.04)],
-                                    startPoint: .top, endPoint: .bottom), lineWidth: 0.85)
+            if isSearchFocused {
+                RoundedRectangle(cornerRadius: NotchStyle.Radius.control)
+                    .strokeBorder(NotchStyle.systemBlue.opacity(0.58), lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
         }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isSearchFocused)
+        .animation(reduceMotion ? nil : NotchStyle.Motion.hover, value: isSearchFocused)
     }
 
     @ViewBuilder
@@ -169,8 +168,8 @@ struct QuickActionsView: View {
             ProgressView()
                 .controlSize(.small)
             Text("正在扫描本机应用…")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white.opacity(0.86))
+                .font(.system(size: 12))
+                .foregroundStyle(NotchStyle.controlInk.opacity(0.86))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityElement(children: .combine)
@@ -184,7 +183,7 @@ struct QuickActionsView: View {
                 .accessibilityHidden(true)
             Text("未找到“\(trimmedQuery)”")
                 .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.88))
+                .foregroundStyle(NotchStyle.controlInk.opacity(0.88))
                 .lineLimit(1)
             Text("可输入“音乐”“番茄钟”“速记”或已安装应用名称")
                 .font(.system(size: 10.5))
@@ -192,7 +191,7 @@ struct QuickActionsView: View {
                 .lineLimit(1)
             Button("清空搜索", action: clearQuery)
                 .buttonStyle(NotchButtonStyle())
-                .font(.system(size: 10.5, weight: .medium))
+                .font(.system(size: 10.5))
                 .padding(.top, 2)
         }
         .padding(.horizontal, 12)
@@ -209,7 +208,7 @@ struct QuickActionsView: View {
                 Text("↑↓ 选择 · ↩ 打开")
                     .accessibilityHidden(true)
             }
-            .font(.system(size: 10, weight: .medium))
+            .font(.system(size: 10))
             .foregroundStyle(NotchStyle.secondary)
             .frame(height: 15)
         }
@@ -333,12 +332,12 @@ private struct QuickActionRowView: View {
 
                 VStack(alignment: .leading, spacing: 1.5) {
                     Text(item.title)
-                        .font(.system(size: 12.5, weight: isSelected ? .semibold : .medium))
-                        .foregroundStyle(.white)
+                        .font(.system(size: 12.5, weight: isSelected ? .semibold : .regular))
+                        .foregroundStyle(NotchStyle.primaryText)
                         .lineLimit(1)
                     Text(item.subtitle)
                         .font(.system(size: 10.5))
-                        .foregroundStyle(isSelected ? Color.white.opacity(0.76) : NotchStyle.secondary)
+                        .foregroundStyle(isSelected ? NotchStyle.controlInk.opacity(0.76) : NotchStyle.secondary)
                         .lineLimit(1)
                 }
 
@@ -346,27 +345,21 @@ private struct QuickActionRowView: View {
 
                 HStack(spacing: 4) {
                     Text(item.badge)
-                        .font(.system(size: 10, weight: isSelected ? .semibold : .medium))
+                        .font(.system(size: 10))
                     if isSelected {
                         Image(systemName: "return")
                             .font(.system(size: 9, weight: .semibold))
                     }
                 }
-                .foregroundStyle(isSelected ? Color.white.opacity(0.90) : NotchStyle.tertiary)
+                .foregroundStyle(isSelected ? NotchStyle.controlInk.opacity(0.90) : NotchStyle.tertiary)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2.5)
-                .background {
-                    if isSelected {
-                        Capsule(style: .continuous)
-                            .fill(Color.white.opacity(0.12))
-                    }
-                }
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
             .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
         }
-        .buttonStyle(QuickActionRowButtonStyle(isSelected: isSelected, accent: item.tint.swiftUIColor))
+        .buttonStyle(QuickActionRowButtonStyle(isSelected: isSelected))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(item.title)，\(item.subtitle)")
         .accessibilityValue(item.badge)
@@ -377,16 +370,14 @@ private struct QuickActionRowView: View {
 
 private struct QuickActionRowButtonStyle: ButtonStyle {
     let isSelected: Bool
-    let accent: Color
 
     func makeBody(configuration: Configuration) -> some View {
-        StyledRow(configuration: configuration, isSelected: isSelected, accent: accent)
+        StyledRow(configuration: configuration, isSelected: isSelected)
     }
 
     private struct StyledRow: View {
         let configuration: Configuration
         let isSelected: Bool
-        let accent: Color
         @State private var isHovering = false
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
         @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
@@ -394,32 +385,26 @@ private struct QuickActionRowButtonStyle: ButtonStyle {
 
         var body: some View {
             let emphasized = differentiateWithoutColor || contrast == .increased
-            let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: NotchStyle.Radius.control)
             configuration.label
                 .background {
                     if isSelected {
-                        shape.fill(Color.white.opacity(0.11))
-                            .overlay {
-                                shape.fill(accent.opacity(emphasized ? 0.27 : 0.14))
-                            }
+                        shape.fill(NotchStyle.controlInk.opacity(emphasized ? 0.20 : NotchStyle.Opacity.selected))
                     } else if isHovering || configuration.isPressed {
-                        shape.fill(Color.white.opacity(configuration.isPressed ? 0.11 : 0.065))
+                        shape.fill(NotchStyle.controlInk.opacity(configuration.isPressed
+                            ? NotchStyle.Opacity.pressed : NotchStyle.Opacity.hover))
                     }
                 }
                 .overlay {
-                    if isSelected {
-                        shape.strokeBorder(
-                            Color.white.opacity(emphasized ? 0.55 : 0.24),
-                            lineWidth: emphasized ? 1.2 : 0.85
-                        )
-                    } else if isHovering {
-                        shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 0.6)
+                    if isSelected && emphasized {
+                        shape.strokeBorder(NotchStyle.hairline(.increased), lineWidth: 1)
+                            .allowsHitTesting(false)
                     }
                 }
                 .contentShape(shape)
                 .scaleEffect(configuration.isPressed && !reduceMotion ? 0.992 : 1)
                 .onHover { isHovering = $0 }
-                .animation(reduceMotion ? nil : .easeOut(duration: 0.10), value: isHovering)
+                .animation(reduceMotion ? nil : NotchStyle.Motion.hover, value: isHovering)
                 .animation(reduceMotion ? nil : NotchStyle.spring, value: configuration.isPressed)
         }
     }
@@ -428,6 +413,7 @@ private struct QuickActionRowButtonStyle: ButtonStyle {
 private struct QuickActionLeadingIcon: View {
     let item: QuickActionItem
     let isSelected: Bool
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         if let appURL = item.appURL {
@@ -435,15 +421,10 @@ private struct QuickActionLeadingIcon: View {
                 .frame(width: 26, height: 26)
                 .accessibilityHidden(true)
         } else {
-            let tint = item.tint.swiftUIColor
             Image(systemName: item.symbol)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(tint)
+                .font(NotchStyle.Typography.cardSymbol)
+                .foregroundStyle(isSelected ? NotchStyle.primaryText : NotchStyle.headerSymbol(contrast))
                 .frame(width: 26, height: 26)
-                .background(
-                    tint.opacity(isSelected ? 0.24 : 0.14),
-                    in: RoundedRectangle(cornerRadius: 7.5, style: .continuous)
-                )
                 .accessibilityHidden(true)
         }
     }
@@ -465,10 +446,6 @@ private struct QuickActionAppIconView: View {
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(NotchStyle.secondary)
                     .frame(width: 26, height: 26)
-                    .background(
-                        Color.white.opacity(0.08),
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    )
             }
         }
         .task(id: url) {
@@ -531,21 +508,6 @@ private final class QuickActionsAppStore {
         fetched.size = NSSize(width: 28, height: 28)
         iconCache.setObject(fetched, forKey: key)
         return fetched
-    }
-}
-
-private extension QuickActionTint {
-    var swiftUIColor: Color {
-        switch self {
-        case .cyan: return .cyan
-        case .pink: return .pink
-        case .purple: return .purple
-        case .orange: return .orange
-        case .mint: return .mint
-        case .blue: return .blue
-        case .green: return .green
-        case .neutral: return Color(white: 0.82)
-        }
     }
 }
 

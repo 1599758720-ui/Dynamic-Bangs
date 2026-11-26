@@ -72,9 +72,9 @@ struct CaptureView: View {
                     .font(.system(size: 11, weight: .semibold))
                 Text(String(localized: "capture.hint", defaultValue: "→ heutige Daily Note"))
                     .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.45))
+                    .foregroundStyle(NotchStyle.primaryText.opacity(0.45))
             }
-            .foregroundStyle(.white.opacity(0.7))
+            .foregroundStyle(NotchStyle.primaryText.opacity(0.7))
 
             pill
                 .frame(maxWidth: NotchLayout.captureFieldWidth)
@@ -108,13 +108,13 @@ struct CaptureView: View {
                 .textFieldStyle(.plain)
                 .lineLimit(1...4)
                 .font(.system(size: 14))
-                .foregroundStyle(.white)
+                .foregroundStyle(NotchStyle.primaryText)
                 .focused($fieldFocused)
                 .onSubmit(submit)
             } else {
                 Text(text.isEmpty ? String(localized: "capture.placeholder", defaultValue: "Schnelle Notiz …") : text)
                     .font(.system(size: 14))
-                    .foregroundStyle(.white.opacity(text.isEmpty ? 0.4 : 1))
+                    .foregroundStyle(text.isEmpty ? NotchStyle.secondary : NotchStyle.primaryText)
                     .lineLimit(4)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -137,22 +137,25 @@ struct CaptureView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.08)))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Color.white.opacity(fieldFocused ? 0.32 : 0.12), lineWidth: 1)
-        )
+        .background(NotchStyle.controlFill, in: RoundedRectangle(cornerRadius: NotchStyle.Radius.card))
+        .overlay {
+            if fieldFocused {
+                RoundedRectangle(cornerRadius: NotchStyle.Radius.card)
+                    .strokeBorder(NotchStyle.systemBlue.opacity(0.58), lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     private var notConfigured: some View {
         VStack(spacing: 6) {
             Image(systemName: "tray.and.arrow.down")
                 .font(.system(size: 20))
-                .foregroundStyle(.white.opacity(0.5))
+                .foregroundStyle(NotchStyle.primaryText.opacity(0.5))
             Text(String(localized: "capture.setup", defaultValue: "Kein Vault konfiguriert.\nEinstellungen → Obsidian"))
                 .multilineTextAlignment(.center)
                 .font(.system(size: 11))
-                .foregroundStyle(.white.opacity(0.6))
+                .foregroundStyle(NotchStyle.primaryText.opacity(0.6))
         }
     }
 
@@ -200,19 +203,13 @@ private struct CaptureIconButton: View {
     var prominent: Bool = false
     let action: () -> Void
 
-    @State private var hovering = false
-
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: prominent ? 18 : 14))
-                .foregroundStyle(prominent ? Color.cyan : .white.opacity(0.8))
-                .frame(width: 24, height: 24)
-                .background(Circle().fill(Color.white.opacity(hovering ? 0.14 : 0)))
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
+        .buttonStyle(NotchButtonStyle(tint: prominent ? NotchStyle.systemBlue : NotchStyle.secondary, shape: .circle(24)))
+        .accessibilityLabel(help)
         .help(help)
     }
 }
@@ -268,7 +265,7 @@ struct QuickLaunchButton: View {
         } label: {
             Image(systemName: "terminal")
                 .font(.system(size: 14))
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(NotchStyle.primaryText.opacity(0.75))
                 .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
         }
@@ -293,7 +290,7 @@ struct OpenInObsidianButton: View {
                     Image(systemName: "diamond")
                         .resizable().scaledToFit()
                         .padding(3)
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(NotchStyle.primaryText.opacity(0.75))
                 }
             }
             .frame(width: 20, height: 20)

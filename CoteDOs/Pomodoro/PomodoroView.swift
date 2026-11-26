@@ -6,6 +6,7 @@ import SwiftUI
 struct PomodoroView: View {
     @ObservedObject var pomodoro: PomodoroManager
     @ObservedObject private var settings = UserSettings.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// True on a side border: the chips run down the page instead of across
     /// it. Three German preset names come to ~330 pt in a row, which a ~200 pt
     /// column can only scroll — two chips visible and the third cut off at the
@@ -18,7 +19,7 @@ struct PomodoroView: View {
             if settings.timerPresets.isEmpty && pomodoro.phase == .idle {
                 Text(String(localized: "timer.empty", defaultValue: "Keine Timer angelegt. Füge welche in den Einstellungen hinzu."))
                     .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(NotchStyle.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 300)
             } else {
@@ -60,7 +61,6 @@ struct PomodoroView: View {
         }
         .padding(3)
         .fixedSize(horizontal: true, vertical: false)
-        .background(.white.opacity(0.06), in: Capsule())
     }
 
     /// While a session is active the chips are locked: the session runs on a
@@ -72,17 +72,18 @@ struct PomodoroView: View {
             pomodoro.selectedPresetID = preset.id
         } label: {
             Text(preset.name)
-                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
                 .lineLimit(1)
                 .frame(height: 25)
                 .padding(.horizontal, 10)
-                // Stacked, the capsules line up on both edges — chips of
-                // three different widths in a column read as a ragged list.
+                // Align both edges when the presets stack vertically.
                 .frame(maxWidth: portrait ? .infinity : nil)
-                .background(.white.opacity(isSelected ? 0.16 : 0), in: Capsule())
-                .foregroundStyle(.white.opacity(isSelected ? 1 : 0.7))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NotchButtonStyle(
+            tint: isSelected ? NotchStyle.primaryText : NotchStyle.secondary,
+            selected: isSelected,
+            horizontalPadding: 0
+        ))
         .disabled(isLocked)
         .opacity(isLocked && !isSelected ? 0.4 : 1)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
@@ -105,23 +106,26 @@ struct PomodoroView: View {
         HStack(spacing: 26) {
             ZStack {
                 UsageRing(value: pomodoro.phase == .idle ? 0 : pomodoro.progress,
-                          color: .orange, lineWidth: 6, endColor: NotchStyle.amber, glowing: pomodoro.phase == .running)
+                          color: NotchStyle.focusOrange, lineWidth: 6, glowing: pomodoro.phase == .running)
                     .frame(width: 114, height: 114)
                 Image(systemName: pomodoro.phase == .paused ? "pause.fill" : "timer")
-                    .font(.system(size: 30, weight: .light)).foregroundStyle(.orange)
+                    .font(.system(size: 30))
+                    .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
+                    .foregroundStyle(pomodoro.phase == .running ? NotchStyle.focusOrange : NotchStyle.secondary)
             }.frame(width: 114, height: 114)
             VStack(alignment: .leading, spacing: 7) {
                 Text(pomodoro.activeName ?? selectedPreset?.name ?? "准备专注")
-                    .font(.system(size: 11, weight: .medium)).foregroundStyle(NotchStyle.secondary)
+                    .font(NotchStyle.Typography.control).foregroundStyle(NotchStyle.secondary)
                 Text(displayText)
-                    .font(.system(size: 42, weight: .bold, design: .rounded))
+                    .font(NotchStyle.Typography.metric(42))
                     .monospacedDigit().lineLimit(1).minimumScaleFactor(0.6)
-                    .foregroundStyle(pomodoro.phase == .paused ? NotchStyle.secondary : .white)
+                    .foregroundStyle(pomodoro.phase == .paused ? NotchStyle.secondary : NotchStyle.primaryText)
                 if pomodoro.phase == .paused {
                     Text("已暂停").font(.system(size: 10)).foregroundStyle(NotchStyle.secondary)
                 }
             }
         }
+        .animation(reduceMotion ? nil : NotchStyle.Motion.surface, value: pomodoro.phase)
     }
 
     // MARK: Controls
@@ -132,7 +136,7 @@ struct PomodoroView: View {
                           label: "重置番茄钟", action: pomodoro.reset)
                 .disabled(pomodoro.phase == .idle)
             ControlButton(systemName: pomodoro.phase == .running ? "pause.fill" : "play.fill", size: 17,
-                          diameter: 42, color: .orange, filled: true,
+                          diameter: 42, filled: true,
                           label: pomodoro.phase == .running ? "暂停番茄钟" : "开始或继续番茄钟", action: primaryAction)
             if settings.timerAutoChain {
                 ControlButton(systemName: "forward.end.fill", size: 14,

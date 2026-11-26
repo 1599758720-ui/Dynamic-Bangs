@@ -2,6 +2,12 @@ import AppKit
 import Combine
 import SwiftUI
 
+/// Allows clicks and SwiftUI drag gestures to work on the first mouse-down even
+/// while the non-activating notch panel is not yet the key window.
+private final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 final class NotchWindowController {
     private let panel: NotchPanel
     private let container: NotchContainerView
@@ -41,7 +47,7 @@ final class NotchWindowController {
         panel = NotchPanel(contentRect: frame)
         container = NotchContainerView(frame: frame)
 
-        let hostingView = NSHostingView(rootView: NotchRootView(
+        let hostingView = FirstMouseHostingView(rootView: NotchRootView(
             viewModel: viewModel, nowPlaying: nowPlaying, shelf: shelf, activities: activities,
             pomodoro: pomodoro, capture: capture, spectrum: spectrum
         ))

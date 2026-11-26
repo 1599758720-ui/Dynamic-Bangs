@@ -16,11 +16,19 @@ struct NotchRootView: View {
     @ObservedObject private var fullscreen = SpectrumFullscreen.shared
     @ObservedObject private var systemStatus = SystemStatus.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.colorScheme) private var systemScheme
     @State private var hasSignal = false
 
     private var hasAudio: Bool { nowPlaying.isPlaying || hasSignal }
+
+    private var workbenchScheme: ColorScheme {
+        switch settings.appearance {
+        case .system: return systemScheme
+        case .dark: return .dark
+        case .light: return .light
+        }
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -62,13 +70,12 @@ struct NotchRootView: View {
                         }
                     }
                     .position(x: localMidX, y: localMidY)
-                    .animation(reduceMotion ? nil : .spring(response: 0.26, dampingFraction: 0.88), value: activeFlank)
+                    .animation(reduceMotion ? nil : NotchStyle.Motion.interactive, value: activeFlank)
                     .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: viewModel.isHovering)
                 }
             }
         }
         .clipped()
-        .environment(\.colorScheme, .dark)
         .onAppear { syncServices() }
         .onReceive(spectrum.$hasSignal.removeDuplicates()) { hasSignal = $0 }
         .onChange(of: nowPlaying.isPlaying) { _, playing in
@@ -93,10 +100,6 @@ struct NotchRootView: View {
             leadingTopFlare: flank.leadingTopFlare,
             trailingTopFlare: flank.trailingTopFlare
         )
-        let rimOpacity: Double = contrast == .increased
-            ? 0.34
-            : (viewModel.isHovering ? 0.18 : 0.08)
-
         CollapsedView(
             viewModel: viewModel,
             nowPlaying: nowPlaying,
@@ -107,31 +110,15 @@ struct NotchRootView: View {
             flankLayout: flank
         )
         .frame(width: size.width, height: size.height)
-        .background {
-            shape.fill(Color.black)
-        }
+        .background(shape.fill(.black))
         .clipShape(shape)
-        .overlay {
-            if flank.hasVisibleWings {
-                shape.strokeBorder(
-                    LinearGradient(
-                        colors: [.clear, .white.opacity(rimOpacity)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
-                    lineWidth: 0.6
-                )
-                .allowsHitTesting(false)
-            }
-        }
-        .shadow(color: .black.opacity(flank.hasVisibleWings ? 0.22 : 0),
-                radius: flank.hasVisibleWings ? 4 : 0, y: 1.5)
+        .environment(\.colorScheme, .dark)
     }
 
     @ViewBuilder
     private func floatingChrome(expanded: Bool, size: CGSize) -> some View {
-        let radius = expanded ? NotchLayout.floatingExpandedCornerRadius : size.height / 2
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        let radius = expanded ? NotchStyle.Radius.panel : NotchStyle.Radius.capsule(height: size.height)
+        let shape = RoundedRectangle(cornerRadius: radius)
 
         Group {
             if expanded {
@@ -158,54 +145,21 @@ struct NotchRootView: View {
         }
         .frame(width: size.width, height: size.height)
         .background {
-            if expanded {
-                if reduceTransparency {
-                    Color(red: 0.08, green: 0.085, blue: 0.10)
-                } else {
-                    Rectangle().fill(.ultraThinMaterial)
-                        .overlay {
-                            LinearGradient(colors: [
-                                Color(red: 0.04, green: 0.045, blue: 0.06).opacity(0.84),
-                                Color(red: 0.07, green: 0.075, blue: 0.095).opacity(0.78),
-                            ], startPoint: .top, endPoint: .bottom)
-                        }
-                        .overlay {
-                            if nowPlaying.isPlaying, let color = nowPlaying.artworkColor {
-                                RadialGradient(colors: [color.opacity(0.12), .clear],
-                                               center: .topLeading, startRadius: 10, endRadius: 285)
-                            }
-                        }
-                }
-            } else if reduceTransparency {
-                Color(white: 0.06)
+            if expanded || activities.current?.progress != nil {
+                NotchFloatingMaterial(silhouette: shape, glassOpacity: expanded ? 0.42 : 0.50)
             } else {
-                Rectangle().fill(.regularMaterial)
-                    .overlay {
-                        LinearGradient(colors: [Color(white: 0.03).opacity(0.86),
-                                                Color(white: 0.075).opacity(0.80)],
-                                       startPoint: .top, endPoint: .bottom)
-                    }
+                shape.fill(.black)
             }
         }
         .clipShape(shape)
         .overlay {
-            shape.strokeBorder(
-                LinearGradient(
-                    colors: [
-                        .white.opacity(contrast == .increased ? 0.44 : (expanded ? 0.24 : 0.18)),
-                        .white.opacity(contrast == .increased ? 0.16 : 0.08),
-                        .white.opacity(contrast == .increased ? 0.10 : 0.04),
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                ),
-                lineWidth: 0.75
-            )
-            .allowsHitTesting(false)
+            if !expanded, activities.current?.progress == nil, contrast == .increased {
+                shape.strokeBorder(.white.opacity(NotchStyle.Opacity.highContrastHairline),
+                                   lineWidth: NotchStyle.hairlineWidth)
+                    .allowsHitTesting(false)
+            }
         }
-        .shadow(color: .black.opacity(expanded ? 0.44 : 0.28),
-                radius: expanded ? 22 : 8, y: expanded ? 10 : 3)
-        .shadow(color: .black.opacity(expanded ? 0.22 : 0), radius: 4, y: 2)
+        .environment(\.colorScheme, expanded ? workbenchScheme : .dark)
     }
 
     private func syncServices() {

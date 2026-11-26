@@ -14,7 +14,6 @@ final class NotchPanel: NSPanel {
 
         isFloatingPanel = true
         level = .floating
-        appearance = NSAppearance(named: .darkAqua)
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false

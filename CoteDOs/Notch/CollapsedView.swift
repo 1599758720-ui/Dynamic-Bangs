@@ -142,18 +142,22 @@ struct CollapsedView: View {
     private func flankActivityTrailing(_ activity: NotchActivity, compact: Bool) -> some View {
         if let progress = activity.progress {
             let fraction = CGFloat(min(max(progress, 0), 1))
+            let barWidth: CGFloat = compact ? 48 : 68
+            let label = activity.title.isEmpty ? "\(Int((fraction * 100).rounded()))%" : activity.title
             VStack(alignment: .trailing, spacing: 3) {
-                Text(activity.title)
-                    .font(.system(size: 10, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
                     .foregroundStyle(activity.tint)
                     .lineLimit(1)
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.white.opacity(0.20))
                     Capsule()
-                        .fill(Color.white.opacity(0.92))
-                        .frame(width: (compact ? 42 : 56) * fraction)
+                        .fill(Color.white.opacity(0.95))
+                        .frame(width: barWidth * fraction)
                 }
-                .frame(width: compact ? 42 : 56, height: 3.5)
+                .frame(width: barWidth, height: 4.5)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.10), value: fraction)
             }
         } else if let detail = activity.detail, !compact {
             VStack(alignment: .trailing, spacing: 1) {
@@ -180,7 +184,7 @@ struct CollapsedView: View {
     @ViewBuilder
     private var floatingPillBody: some View {
         Group {
-            if let swipe = viewModel.musicSwipe {
+            if let swipe = viewModel.musicSwipe, activity?.progress == nil {
                 Label(swipe.title, systemImage: swipe.symbol)
                     .font(.subheadline.weight(.semibold))
             } else if let activity {
@@ -282,10 +286,15 @@ struct CollapsedView: View {
     }
 
     private var accessibilitySummary: String {
+        if let activity, let progress = activity.progress {
+            let name = activity.title.isEmpty
+                ? (activity.icon.hasPrefix("sun.") ? "亮度" : "音量")
+                : activity.title
+            return "\(name)，\(percentage(progress))"
+        }
         if let swipe = viewModel.musicSwipe { return swipe.title }
         if let activity {
-            let detail = activity.progress.map { percentage($0) } ?? activity.detail
-            return [activity.title, detail].compactMap { $0 }.joined(separator: "，")
+            return [activity.title, activity.detail].compactMap { $0 }.joined(separator: "，")
         }
 
         let showsSystem = store.layout.leading == .system || store.layout.trailing == .system

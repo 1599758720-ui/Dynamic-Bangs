@@ -48,10 +48,10 @@ struct MusicArtwork: View {
         }.overlay(Circle().stroke(.white.opacity(0.15), lineWidth: 0.7))
     }
     private var cover: some View {
-        AsyncImage(url: url, transaction: Transaction(animation: .easeOut(duration: 0.18))) { phase in
+        AsyncImage(url: url, transaction: Transaction(animation: reduceMotion ? nil : .easeOut(duration: 0.18))) { phase in
             if let image = phase.image { image.resizable().scaledToFill() }
             else {
-                Rectangle().fill(LinearGradient(colors: [.pink.opacity(0.5), .purple.opacity(0.4)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                Rectangle().fill(LinearGradient(colors: [Color(white: 0.19), Color(white: 0.09)], startPoint: .topLeading, endPoint: .bottomTrailing))
                     .overlay(Image(systemName: "music.note").font(.system(size: size * 0.22, weight: .medium)).foregroundStyle(.white.opacity(0.8)))
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity).clipped()

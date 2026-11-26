@@ -358,11 +358,9 @@ enum NotchLayout {
     /// (pure, unit-tested alongside the menu-bar geometry).
     /// Inner horizontal padding of the compact island's content row.
     static let compactContentInset: CGFloat = 12
-    /// Corner radius of the open island — continuous, all four corners: it
-    /// floats cleanly below the menu bar rather than hanging off the screen edge.
-    static let floatingExpandedCornerRadius: CGFloat = 28
     /// Bottom corner radius of the top-joined compact notch-flanking bar.
     static let notchFlankBottomCornerRadius: CGFloat = 13
+    static let progressHUDWidth: CGFloat = 180
     /// Breathing gap between the menu bar's bottom edge and the expanded
     /// workbench card when opened from the physical notch.
     static let expandedNotchTopGap: CGFloat = 4

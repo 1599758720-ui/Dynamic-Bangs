@@ -1,3 +1,4 @@
+import AudioToolbox
 import Combine
 import CoreAudio
 import SwiftUI
@@ -159,11 +160,10 @@ private final class VolumeHUDProvider {
     /// accumulates past the threshold.
     private var lastReportedLevel: Double = -1
     private var lastMuted = false
-    /// Minimum volume change (listener-driven) before the HUD shows — a bit under
-    /// one macOS step (1/16 ≈ 0.0625). AirPods report sub-step scalar jitter of
-    /// their own accord (~0.01); without this floor the HUD popped constantly
-    /// even when nobody touched the volume. Key presses bypass it via `force`.
-    private static let minReportDelta = 0.04
+    /// Minimum volume change (listener-driven) before the HUD shows — small enough
+    /// to catch every 1/64 fine step (0.0156) and 1/16 standard step (0.0625),
+    /// while still filtering sub-percent AirPods scalar jitter (~0.005–0.01).
+    private static let minReportDelta = 0.012
     /// Reports before this instant are swallowed (level/mute tracked, but no HUD).
     /// Set briefly after the default device changes: switching output (AirPods
     /// connecting, unplugging headphones) makes CoreAudio report the *new*
@@ -176,6 +176,12 @@ private final class VolumeHUDProvider {
     private var defaultDeviceAddress = AudioObjectPropertyAddress(
         mSelector: kAudioHardwarePropertyDefaultOutputDevice,
         mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    private var virtualMainVolumeAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
+        mScope: kAudioObjectPropertyScopeOutput,
         mElement: kAudioObjectPropertyElementMain
     )
 
@@ -236,11 +242,15 @@ private final class VolumeHUDProvider {
     private func setVolume(_ level: Double) {
         var value = Float32(min(max(level, 0), 1))
         let size = UInt32(MemoryLayout<Float32>.size)
-        // Prefer the virtual main element; fall back to per-channel for devices
-        // (e.g. built-in speakers) that expose no settable master scalar.
+        // Prefer Apple's VirtualMainVolume (matches macOS's perceptual volume curve),
+        // then fall back to main/per-channel scalar for devices that don't expose it.
+        var virtualMain = virtualMainVolumeAddress
         var main = volumeAddress(element: kAudioObjectPropertyElementMain)
         var settable: DarwinBoolean = false
-        if AudioObjectHasProperty(device, &main),
+        if AudioObjectHasProperty(device, &virtualMain),
+           AudioObjectIsPropertySettable(device, &virtualMain, &settable) == noErr, settable.boolValue {
+            AudioObjectSetPropertyData(device, &virtualMain, 0, nil, size, &value)
+        } else if AudioObjectHasProperty(device, &main),
            AudioObjectIsPropertySettable(device, &main, &settable) == noErr, settable.boolValue {
             AudioObjectSetPropertyData(device, &main, 0, nil, size, &value)
         } else {
@@ -288,9 +298,14 @@ private final class VolumeHUDProvider {
         if didInitialAttach { suppressUntil = Date().addingTimeInterval(0.8) }
         didInitialAttach = true
 
-        // Built-in speakers often expose no master (Main) volume scalar — only
-        // per-channel — so a listener on the Main element alone never fires.
-        // Attach to every element that actually has the property (Main + L/R).
+        // Prefer VirtualMainVolume so external volume changes match macOS's exact
+        // 16-step / 64-step scale; also listen on scalar elements for devices that
+        // only emit per-channel updates.
+        let virtualListener = AudioPropertyListener(
+            object: device, address: virtualMainVolumeAddress
+        ) { [weak self] in self?.report() }
+        if virtualListener.start() { volumeListeners.append(virtualListener) }
+
         for element in [kAudioObjectPropertyElementMain, UInt32(1), UInt32(2)] {
             let listener = AudioPropertyListener(
                 object: device, address: volumeAddress(element: element)
@@ -342,11 +357,16 @@ private final class VolumeHUDProvider {
         return status == noErr ? id : 0
     }
 
-    /// Reads the virtual main volume, falling back to averaging the first two
-    /// channels for devices without a master element.
+    /// Reads VirtualMainVolume first (macOS's perceptual curve), falling back to
+    /// the main or averaged per-channel scalar for devices without it.
     private func readVolume() -> Double {
         var value = Float32(0)
         var size = UInt32(MemoryLayout<Float32>.size)
+        var virtualMain = virtualMainVolumeAddress
+        if AudioObjectHasProperty(device, &virtualMain),
+           AudioObjectGetPropertyData(device, &virtualMain, 0, nil, &size, &value) == noErr {
+            return Double(value)
+        }
         var addr = volumeAddress(element: kAudioObjectPropertyElementMain)
         if AudioObjectHasProperty(device, &addr),
            AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &value) == noErr {

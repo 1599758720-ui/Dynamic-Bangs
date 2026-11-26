@@ -22,7 +22,7 @@ struct ControlButton: View {
     let systemName: String
     var size: CGFloat
     var diameter: CGFloat = 32
-    var color: Color = .white
+    var color: Color = NotchStyle.controlInk
     var filled = false
     /// Spoken name. Required rather than optional on purpose: a `Button` whose
     /// label is only an `Image(systemName:)` announces nothing at all to
@@ -30,11 +30,13 @@ struct ControlButton: View {
     /// can forget is an argument that gets forgotten.
     let label: String
     let action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: size, weight: .semibold))
+                .font(.system(size: size, weight: .medium))
+                .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
         }
         .buttonStyle(NotchButtonStyle(tint: color, filled: filled, shape: .circle(diameter)))
         .accessibilityLabel(label)

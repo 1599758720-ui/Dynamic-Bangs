@@ -8,7 +8,6 @@ struct NowPlayingView: View {
     @StateObject private var output = AudioOutputController()
     @State private var scrubFraction: Double?
     var portrait = false
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         VStack(spacing: 14) {
@@ -17,23 +16,15 @@ struct NowPlayingView: View {
                     MusicArtwork(url: nowPlaying.track?.artworkURL,
                         playing: nowPlaying.isPlaying && nowPlaying.screensAwake,
                         size: 118, appearance: widgets.layout.musicAppearance)
-                        .background {
-                            if !reduceTransparency, let color = nowPlaying.artworkColor {
-                                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                    .fill(color.opacity(0.44))
-                                    .padding(6)
-                                    .blur(radius: 17)
-                            }
-                        }
                 }.buttonStyle(.plain).accessibilityLabel("打开当前音乐播放器")
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 5) {
-                        Circle().fill(nowPlaying.isPlaying ? .green : NotchStyle.tertiary).frame(width: 4, height: 4)
+                        Circle().fill(nowPlaying.isPlaying ? NotchStyle.statusGreen : NotchStyle.tertiary).frame(width: 4, height: 4)
                         Text(nowPlaying.sourceName + (nowPlaying.isPlaying ? " · 正在播放" : " · 已暂停"))
-                            .font(.system(size: 9, weight: .medium)).foregroundStyle(NotchStyle.secondary)
+                            .font(.system(size: 9)).foregroundStyle(NotchStyle.secondary)
                     }
                     Text(nowPlaying.track?.name ?? "等一首喜欢的歌")
-                        .font(.system(size: 18, weight: .bold)).lineLimit(2)
+                        .font(.system(size: 18, weight: .semibold)).lineLimit(2)
                         .help(nowPlaying.track?.name ?? "打开网易云、Apple Music 或 Spotify 开始播放")
                     Text(nowPlaying.track?.artist ?? "在播放器中开始播放，音乐会自动出现在这里")
                         .font(.system(size: 12.5)).foregroundStyle(NotchStyle.secondary).lineLimit(1)
@@ -52,8 +43,7 @@ struct NowPlayingView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 VStack(spacing: 10) {
                     outputPicker
-                    WidgetWave(spectrum: spectrum, active: nowPlaying.isPlaying && nowPlaying.screensAwake,
-                               color: nowPlaying.artworkColor ?? .pink, compact: true)
+                    WidgetWave(spectrum: spectrum, active: nowPlaying.isPlaying && nowPlaying.screensAwake, compact: true)
                         .frame(height: 20)
                 }
             }.frame(maxWidth: 520)
@@ -62,7 +52,7 @@ struct NowPlayingView: View {
                     if !editing, let value = scrubFraction, let duration = nowPlaying.track?.duration {
                         nowPlaying.seek(to: value * duration); scrubFraction = nil
                     }
-                }.tint(.white).controlSize(.small).disabled((nowPlaying.track?.duration ?? 0) <= 0)
+                }.tint(NotchStyle.controlInk).controlSize(.small).disabled((nowPlaying.track?.duration ?? 0) <= 0)
                     .accessibilityLabel("歌曲播放进度")
                 HStack {
                     Text(timeString((scrubFraction ?? nowPlaying.playbackFraction) * (nowPlaying.track?.duration ?? 0)))
@@ -70,7 +60,7 @@ struct NowPlayingView: View {
                     if widgets.layout.swipeTracks { Text("两指左滑下一首 · 右滑上一首") }
                     Spacer()
                     Text(timeString(nowPlaying.track?.duration ?? 0))
-                }.font(.system(size: 10, weight: .medium)).monospacedDigit().foregroundStyle(NotchStyle.secondary)
+                }.font(.system(size: 10)).monospacedDigit().foregroundStyle(NotchStyle.secondary)
             }.frame(maxWidth: 520)
             if let error = nowPlaying.commandError {
                 HStack {
@@ -86,6 +76,10 @@ struct NowPlayingView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background {
+            NotchArtworkWash(color: nowPlaying.artworkColor, center: UnitPoint(x: 0.24, y: 0.39))
+                .clipShape(.rect(cornerRadius: NotchStyle.Radius.card))
+        }
         .onAppear { output.start() }.onDisappear { output.stop() }
     }
     private var outputPicker: some View {
@@ -99,7 +93,6 @@ struct NowPlayingView: View {
         } label: {
             Image(systemName: "airplayaudio")
                 .font(.system(size: 13)).frame(width: 32, height: 32)
-                .background(.white.opacity(0.095), in: Circle())
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
         .accessibilityLabel("选择音频输出").help("选择扬声器或耳机")

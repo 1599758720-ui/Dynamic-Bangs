@@ -153,10 +153,11 @@ final class NotchViewModel: ObservableObject {
                       height: max(0, min(NotchLayout.expandedHeight, bounds.height - NotchLayout.panelVerticalMargin)))
     }
 
-    func compactSize(hasAudio: Bool, hasTransientActivity: Bool, timerText: String?) -> CGSize {
-        let width = collapsedWidth(isPlaying: hasAudio || hasTransientActivity, hasItems: false, timerText: timerText)
-        return CGSize(width: min(expandedWidth, width),
-                      height: min(expandedHeight, collapsedHeight))
+    private func compactSize(hasAudio: Bool, activity: NotchActivity?, swipe: MusicSwipe?, timerText: String?) -> CGSize {
+        let width = activity?.progress != nil
+            ? NotchLayout.progressHUDWidth
+            : collapsedWidth(isPlaying: hasAudio || activity != nil || swipe != nil, hasItems: false, timerText: timerText)
+        return CGSize(width: min(expandedWidth, width), height: min(expandedHeight, collapsedHeight))
     }
 
     func collapsedWidth(isPlaying: Bool, hasItems: Bool, timerText: String?) -> CGFloat {
@@ -262,17 +263,23 @@ final class NotchViewModel: ObservableObject {
         )
     }
 
-    /// True when a transient activity or music-swipe toast cannot fit beside a
-    /// crowded menu bar and should temporarily appear just beneath the notch.
+    /// Progress HUDs drop below the notch. Other transients drop only when
+    /// the available menu bar space cannot accommodate the requested wings.
     func shouldDropDownTransientActivity(hasAudio: Bool,
                                          activity: NotchActivity?,
                                          swipe: MusicSwipe?,
                                          timerText: String?) -> Bool {
-        guard activity != nil || swipe != nil,
-              let flank = flankLayout(hasAudio: hasAudio, activity: activity, swipe: swipe, timerText: timerText) else {
-            return false
-        }
-        return flank.shouldDropDownTransientActivity
+        guard isNotchFlankingMode else { return false }
+        return shouldDropDown(activity: activity, swipe: swipe, flank: flankLayout(
+            hasAudio: hasAudio, activity: activity, swipe: swipe, timerText: timerText
+        ))
+    }
+
+    private func shouldDropDown(activity: NotchActivity?, swipe: MusicSwipe?,
+                                flank: @autoclosure () -> NotchFlankLayout?) -> Bool {
+        if activity?.progress != nil { return true }
+        guard activity != nil || swipe != nil else { return false }
+        return flank()?.shouldDropDownTransientActivity == true
     }
 
     /// Single source of truth for the rendered and interactive island rect in
@@ -289,19 +296,18 @@ final class NotchViewModel: ObservableObject {
                     inPanel: panelFrame, size: expandedIslandSize, topGap: NotchLayout.expandedNotchTopGap
                 )
             }
-            if let flank = flankLayout(hasAudio: hasAudio, activity: activity, swipe: swipe, timerText: timerText) {
-                if (activity != nil || swipe != nil) && flank.shouldDropDownTransientActivity {
-                    let pill = compactSize(hasAudio: hasAudio, hasTransientActivity: true, timerText: timerText)
-                    return geometry.activityDropDownRect(
-                        inPanel: panelFrame, size: pill, topGap: NotchLayout.islandTopGap
-                    )
-                }
-                return flank.frame
+            let flank = flankLayout(hasAudio: hasAudio, activity: activity, swipe: swipe, timerText: timerText)
+            if shouldDropDown(activity: activity, swipe: swipe, flank: flank) {
+                let pill = compactSize(hasAudio: hasAudio, activity: activity, swipe: swipe, timerText: timerText)
+                return geometry.activityDropDownRect(
+                    inPanel: panelFrame, size: pill, topGap: NotchLayout.islandTopGap
+                )
             }
+            if let flank { return flank.frame }
         }
         let size = occupiesExpandedFootprint
             ? expandedIslandSize
-            : compactSize(hasAudio: hasAudio, hasTransientActivity: activity != nil || swipe != nil, timerText: timerText)
+            : compactSize(hasAudio: hasAudio, activity: activity, swipe: swipe, timerText: timerText)
         return placement.islandRect(inPanel: panelFrame, size: size, gap: NotchLayout.islandTopGap)
     }
 

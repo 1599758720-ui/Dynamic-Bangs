@@ -11,7 +11,7 @@ struct ShelfView: View {
                     Image(systemName: "tray.and.arrow.down")
                         .font(.system(size: 25, weight: .light))
                     Text("拖放文件到这里暂存")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 12))
                 }
                 .foregroundStyle(NotchStyle.secondary)
             } else {
@@ -34,15 +34,16 @@ struct ShelfView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.white.opacity(shelf.isDropTargeted ? 0.10 : 0.055),
-                    in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(NotchStyle.controlInk.opacity(shelf.isDropTargeted ? NotchStyle.Opacity.hover : 0.035),
+                    in: RoundedRectangle(cornerRadius: NotchStyle.Radius.card))
         .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(shelf.isDropTargeted ? Color.accentColor
-                              : .white.opacity(contrast == .increased ? 0.26 : 0.10),
-                              style: StrokeStyle(lineWidth: shelf.isDropTargeted ? 1.5 : 0.75,
-                                                 dash: shelf.isDropTargeted ? [5, 4] : []))
-                .allowsHitTesting(false)
+            if shelf.isDropTargeted || contrast == .increased {
+                RoundedRectangle(cornerRadius: NotchStyle.Radius.card)
+                    .strokeBorder(shelf.isDropTargeted ? NotchStyle.systemBlue : NotchStyle.hairline(contrast),
+                                  style: StrokeStyle(lineWidth: shelf.isDropTargeted ? 1.5 : NotchStyle.hairlineWidth,
+                                                     dash: shelf.isDropTargeted ? [5, 4] : []))
+                    .allowsHitTesting(false)
+            }
         }
         .overlay(alignment: .topTrailing) {
             if !shelf.items.isEmpty {
@@ -73,7 +74,7 @@ private struct ShelfItemView: View {
                 } else {
                     Image(systemName: "doc")
                         .font(.system(size: 22))
-                        .foregroundStyle(.white.opacity(0.6))
+                        .foregroundStyle(NotchStyle.secondary)
                 }
             }
             .frame(width: 46, height: 46)
@@ -81,29 +82,24 @@ private struct ShelfItemView: View {
                 if item.isMissing {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 11))
-                        .foregroundStyle(.yellow)
+                        .foregroundStyle(NotchStyle.focusOrange)
                 }
             }
 
             Text(item.name)
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 10))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(width: 64)
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(NotchStyle.primaryText)
         }
         .padding(9)
-        .background(.white.opacity(hovering ? 0.13 : 0.075),
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.white.opacity(0.10), lineWidth: 0.65)
-                .allowsHitTesting(false)
-        }
+        .background(NotchStyle.controlInk.opacity(hovering ? NotchStyle.Opacity.hover : NotchStyle.Opacity.control),
+                    in: RoundedRectangle(cornerRadius: NotchStyle.Radius.control))
         .offset(y: hovering && !reduceMotion ? -2 : 0)
         .opacity(item.isMissing ? 0.55 : 1)
         .onHover { hovering = $0 }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovering)
+        .animation(reduceMotion ? nil : NotchStyle.Motion.hover, value: hovering)
         .help(item.isMissing
               ? "原文件已不存在" + " — " + item.name
               : item.name)

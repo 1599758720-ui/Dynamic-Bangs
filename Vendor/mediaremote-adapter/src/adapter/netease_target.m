@@ -16,7 +16,7 @@
 - (void)requestNowPlayingItemArtworkWithCompletion:(void (^)(id, NSError *))completion;
 - (NSData *)imageData;
 - (id)initWithDestination:(id)destination;
-+ (void)sendCommand:(unsigned int)command toDestination:(id)destination options:(NSDictionary *)options appOptions:(unsigned int)appOptions withCompletion:(id)completion;
++ (void)sendCommand:(unsigned int)command toDestination:(id)destination options:(NSDictionary *)options appOptions:(unsigned int)appOptions withCompletion:(void (^)(id result))completion;
 @end
 
 NSDictionary *cotedosNeteaseData(void);
@@ -33,12 +33,14 @@ void cotedosNeteaseSendOptions(unsigned int command, NSDictionary *options) {
     id path = [[pathClass alloc] initWithOrigin:[origin localOrigin]
         bundleIdentifier:@"com.netease.163music" player:[player defaultPlayer]];
     id destination = [[destClass alloc] initWithPlayerPath:path];
-    [controllerClass sendCommand:command toDestination:destination options:options appOptions:0 withCompletion:nil];
-    // Keep the helper alive for delivery. Confirmation is read in a NEW helper
-    // by NeteaseSource.refreshTargeted: MediaRemote can cache a request's state
-    // for the lifetime of this process, even after a command has taken effect.
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:0.6];
-    while (deadline.timeIntervalSinceNow > 0)
+    __block BOOL done = NO;
+    [controllerClass sendCommand:command toDestination:destination options:options appOptions:0 withCompletion:^(id result) {
+        (void)result;
+        done = YES;
+    }];
+    // Keep the helper alive until MediaRemote confirms delivery (bounded so it never hangs).
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1.0];
+    while (!done && deadline.timeIntervalSinceNow > 0)
         [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
 
 }
